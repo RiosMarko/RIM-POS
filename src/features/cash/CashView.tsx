@@ -5,13 +5,18 @@ import type { ConfirmDraft } from "../../components/modals/CommonModals";
 import { money } from "../../lib/money";
 import {
   cancelSale,
+  createCashCount,
   closeShiftCutZ,
   createCashMovement,
+  listAuditLog,
+  listCashCounts,
   getShiftCutX,
+  listShiftCuts,
   listCashMovements,
   listSales,
+  printShiftCut,
 } from "../../lib/posApi";
-import type { CashMovement, CashSession, SaleListItem, ShiftCutSnapshot, UserSession } from "../../types";
+import type { AuditLogEntry, CashCount, CashMovement, CashSession, SaleListItem, ShiftCutSnapshot, UserSession } from "../../types";
 import { CashDialog, SaleCancelModal } from "./CashModals";
 
 export function CashView({
@@ -32,6 +37,9 @@ export function CashView({
   requestConfirm: (draft: ConfirmDraft) => void;
 }) {
   const [movements, setMovements] = useState<CashMovement[]>([]);
+  const [counts, setCounts] = useState<CashCount[]>([]);
+  const [cuts, setCuts] = useState<ShiftCutSnapshot[]>([]);
+  const [auditLog, setAuditLog] = useState<AuditLogEntry[]>([]);
   const [sales, setSales] = useState<SaleListItem[]>([]);
   const [cashDialog, setCashDialog] = useState<"open" | "in" | "out" | "audit" | "close" | null>(null);
   const [cutSnapshot, setCutSnapshot] = useState<ShiftCutSnapshot | null>(null);
@@ -44,9 +52,14 @@ export function CashView({
   const totalSales = cashSales + cardSales + transferSales;
 
   const refresh = useCallback(async () => {
-    if (cashSession) setMovements(await listCashMovements(cashSession.id));
+    if (cashSession) {
+      setMovements(await listCashMovements(cashSession.id));
+      setCounts(await listCashCounts(cashSession.id));
+    }
+    setCuts(await listShiftCuts());
+    if (session.role === "admin") setAuditLog(await listAuditLog());
     setSales(await listSales());
-  }, [cashSession]);
+  }, [cashSession, session.role]);
 
   useEffect(() => {
     refresh().catch((error) => showToast(String(error)));
@@ -81,8 +94,20 @@ export function CashView({
     }
   };
 
-  const cashAudit = (counted: number) => {
+  const cashAudit = async (counted: number, denominationsJson: string, differenceReason?: string) => {
+    if (!cashSession) return;
     const diff = counted - expectedCash;
+    await createCashCount({
+      session_id: cashSession.id,
+      shift_id: cutSnapshot?.shift_id ?? null,
+      count_type: "audit",
+      expected_cash: expectedCash,
+      counted_cash: counted,
+      denominations_json: denominationsJson,
+      difference_reason: differenceReason || null,
+      actor_id: session.id,
+    });
+    await refresh();
     setCashDialog(null);
     showToast(`Arqueo: contado ${money(counted)}, diferencia ${money(diff)}`);
   };
@@ -97,7 +122,7 @@ export function CashView({
     }
   };
 
-  const finalCut = async (counted: number) => {
+  const finalCut = async (counted: number, denominationsJson: string, differenceReason?: string) => {
     if (!cashSession) return;
     requestConfirm({
       title: "Cerrar turno",
@@ -108,7 +133,13 @@ export function CashView({
         setCashDialog(null);
         try {
           const preview = await getShiftCutX();
-          const snapshot = await closeShiftCutZ({ shift_id: preview.shift_id, closing_cash: counted, closed_by: session.id });
+          const snapshot = await closeShiftCutZ({
+            shift_id: preview.shift_id,
+            closing_cash: counted,
+            closed_by: session.id,
+            denominations_json: denominationsJson,
+            difference_reason: differenceReason || null,
+          });
           setCutSnapshot(snapshot);
           await refresh();
           await refreshSummary();
@@ -158,6 +189,7 @@ export function CashView({
           <span>Efectivo {money(cutSnapshot.cash_paid)}</span>
           <span>Tarjeta {money(cutSnapshot.card_paid)}</span>
           <span>Crédito {money(cutSnapshot.transfer_paid)}</span>
+          <span>Diferencia {money(cutSnapshot.cash_difference ?? ((cutSnapshot.closing_cash ?? cutSnapshot.expected_cash) - cutSnapshot.expected_cash))}</span>
         </div>
       )}
       <div className="cash-layout">
@@ -190,6 +222,32 @@ export function CashView({
               <strong>{movement.movement_type === "in" ? "+" : movement.movement_type === "out" ? "-" : ""}{money(movement.amount)}</strong>
               <span>{movement.reason}</span>
               <small>{movement.actor_name}</small>
+            </div>
+          ))}
+          <h3>Arqueos</h3>
+          {counts.map((count) => (
+            <div className="kardex-row" key={count.id}>
+              <strong>{count.count_type === "close" ? "Cierre" : "Arqueo"} {money(count.counted_cash)}</strong>
+              <span>Diferencia {money(count.difference)}</span>
+              <small>{count.difference_reason || count.actor_name}</small>
+            </div>
+          ))}
+          <h3>Cortes</h3>
+          {cuts.map((cut) => (
+            <div className="kardex-row" key={cut.shift_id}>
+              <strong>{cut.status === "closed" ? "Z" : "X"} #{cut.shift_id}</strong>
+              <span>{money(cut.net_sales)} · dif {money(cut.cash_difference ?? 0)}</span>
+              <button className="ghost-button mini" type="button" onClick={() => printShiftCut(cut.shift_id).then((result) => showToast(result.message)).catch((error) => showToast(String(error)))}>
+                Reimprimir
+              </button>
+            </div>
+          ))}
+          {auditLog.length > 0 && <h3>Bitacora</h3>}
+          {auditLog.slice(0, 8).map((entry) => (
+            <div className="kardex-row" key={entry.id}>
+              <strong>{entry.action}</strong>
+              <span>{entry.entity} {entry.entity_id ?? ""}</span>
+              <small>{entry.actor_name ?? "Sistema"}</small>
             </div>
           ))}
         </aside>

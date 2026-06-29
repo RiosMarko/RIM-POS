@@ -29,6 +29,20 @@ const fallbackTaxOptions: TaxOption[] = [
   { id: 5, name: "IEPS 26.5%", rate: 0.265, type: "IEPS", country: "MX", is_active: true },
 ];
 
+const normalizeBarcode = (value: string) => value.replace(/[^0-9A-Za-z]/g, "").trim();
+
+const suggestCategory = (name: string, fallback = "Abarrotes") => {
+  const value = name.toLowerCase().normalize("NFD").replace(/\p{Diacritic}/gu, "");
+  if (/(refresco|agua|jugo|suero|bebida)/.test(value)) return "Bebidas";
+  if (/(papa|cacahuate|botana|chicharron)/.test(value)) return "Botanas";
+  if (/(leche|crema|queso|yogur)/.test(value)) return "Lacteos";
+  if (/(jabon|detergente|cloro|suavizante|fibra)/.test(value)) return "Limpieza";
+  if (/(papel|servilleta|shampoo|pasta dental)/.test(value)) return "Higiene";
+  if (/(galleta|pan|roles)/.test(value)) return "Panaderia";
+  if (/(dulce|chicle|chocolate|paleta)/.test(value)) return "Dulces";
+  return fallback || "Abarrotes";
+};
+
 export function ProductsView({
   products,
   refreshProducts,
@@ -177,11 +191,14 @@ export function ProductsView({
         const values = parseCsvLine(line);
         const row = Object.fromEntries(headers.map((header, index) => [header, values[index] ?? ""]));
         if (!row.name) continue;
+        const barcode = normalizeBarcode(row.barcode || row.sku || "");
+        const sku = (row.sku || barcode || `SKU-${Date.now()}-${imported}`).trim().toUpperCase();
+        const name = row.name.trim().replace(/\s+/g, " ");
         await upsertProduct({
-          sku: row.sku || row.barcode || `SKU-${Date.now()}-${imported}`,
-          barcode: row.barcode || row.sku || "",
-          name: row.name,
-          category: row.category || "Abarrotes",
+          sku,
+          barcode,
+          name,
+          category: suggestCategory(name, row.category || "Abarrotes"),
           unit: row.unit || "pieza",
           price: Number(row.price || 0),
           cost: Number(row.cost || 0),
@@ -326,7 +343,13 @@ export function ProductsView({
             <span>{money(product.price)}</span>
             <span>{formatTaxPercent(taxBreakdownForProduct(product).iva)}</span>
             <span>{formatTaxPercent(taxBreakdownForProduct(product).ieps)}</span>
-            <button className="ghost-button row-action" type="button" onClick={() => { setForm({ ...product, tax_ids: taxIdsForProduct(product) }); setEditorOpen(true); }}>
+            <button className="ghost-button row-action" type="button" onClick={() => {
+              setForm({
+                ...product,
+                tax_ids: taxIdsForProduct(product),
+              });
+              setEditorOpen(true);
+            }}>
               Editar
             </button>
             <button className="icon-button danger" type="button" onClick={() => remove(product)} aria-label={`Desactivar ${product.name}`}>

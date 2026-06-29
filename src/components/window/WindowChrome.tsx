@@ -82,10 +82,23 @@ export function WindowTitlebar({
   );
 }
 
-export function WindowTransitionCover({ phase }: { phase: "cover" | "reveal" }) {
+export function WindowTransitionCover({
+  phase,
+  title,
+  detail,
+}: {
+  phase: "cover" | "reveal";
+  title?: string;
+  detail?: string;
+}) {
   return (
-    <div className={`window-transition-cover ${phase}`} aria-hidden="true">
-      <img src={rimPosLogo} alt="" />
+    <div className={`window-transition-cover ${phase}`} role="status" aria-live="polite" aria-label="Cargando">
+      <div className="window-transition-loader">
+        <span className="window-transition-spinner" aria-hidden="true" />
+        <img src={rimPosLogo} alt="" />
+        <strong>{title ?? (phase === "cover" ? "Cargando" : "Listo")}</strong>
+        <span>{detail ?? "Preparando RIM-POS"}</span>
+      </div>
     </div>
   );
 }

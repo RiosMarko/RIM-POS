@@ -14,7 +14,6 @@ export type Product = {
   tax_ids: number[];
   sat_product_key?: string | null;
   sat_unit_key?: string | null;
-  track_inventory?: boolean;
   active: boolean;
 };
 
@@ -109,6 +108,9 @@ export type ShiftCutSnapshot = {
   opening_cash: number;
   expected_cash: number;
   closing_cash?: number | null;
+  counted_cash?: number | null;
+  cash_difference?: number | null;
+  difference_reason?: string | null;
 };
 
 export type MonthlySalesReport = {
@@ -138,6 +140,30 @@ export type CashMovement = {
   amount: number;
   reason: string;
   actor_name: string;
+  created_at: string;
+};
+
+export type CashCount = {
+  id: number;
+  session_id: number;
+  shift_id?: number | null;
+  count_type: "audit" | "close";
+  expected_cash: number;
+  counted_cash: number;
+  difference: number;
+  denominations_json: string;
+  difference_reason?: string | null;
+  actor_name: string;
+  created_at: string;
+};
+
+export type AuditLogEntry = {
+  id: number;
+  actor_name?: string | null;
+  action: string;
+  entity: string;
+  entity_id?: number | null;
+  details?: string | null;
   created_at: string;
 };
 
@@ -209,6 +235,19 @@ export type ReportMovement = {
 export type BackupResult = {
   path: string;
   created_at: string;
+};
+
+export type BackupFile = {
+  path: string;
+  name: string;
+  size_bytes: number;
+  created_at: string;
+};
+
+export type BackupRestoreResult = {
+  restored_path: string;
+  safety_backup_path: string;
+  restored_at: string;
 };
 
 export type HardwareResult = {

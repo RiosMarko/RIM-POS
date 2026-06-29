@@ -1,7 +1,7 @@
-import { Archive, Percent, Printer, Scale, ShieldCheck } from "lucide-react";
+import { Archive, Percent, Printer, Scale } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Setting } from "../../components/display/SummaryCards";
-import { createBackup, getSetting, listHardwareDevices, openDrawer, printTicket, readScale, setSetting } from "../../lib/posApi";
+import { getSetting, listHardwareDevices, openDrawer, printTicket, readScale, setSetting } from "../../lib/posApi";
 import type { HardwareDevice } from "../../types";
 
 export function SettingsView({
@@ -14,6 +14,7 @@ export function SettingsView({
   const [printer, setPrinter] = useState("mock-printer-80mm");
   const [scale, setScale] = useState("mock-scale-serial");
   const [drawer, setDrawer] = useState("mock-drawer-escpos");
+  const [workstationId, setWorkstationId] = useState("CAJA-1");
   const [taxEnabled, setTaxEnabled] = useState(true);
   const [taxCountry, setTaxCountry] = useState("MX");
   const [taxDefaultRate, setTaxDefaultRate] = useState(0.16);
@@ -61,6 +62,7 @@ export function SettingsView({
   useEffect(() => {
     Promise.all([
       getSetting("printer"),
+      getSetting("workstation_id"),
       getSetting("scale"),
       getSetting("drawer"),
       getSetting("tax_enabled"),
@@ -85,6 +87,7 @@ export function SettingsView({
     ])
       .then(([
         nextPrinter,
+        nextWorkstationId,
         nextScale,
         nextDrawer,
         nextTaxEnabled,
@@ -111,6 +114,7 @@ export function SettingsView({
         const defaultPrinter = nextDevices.find((device) => device.device_type === "printer" && device.is_default) ?? nextDevices.find((device) => device.device_type === "printer");
         const defaultSerial = nextDevices.find((device) => device.device_type === "serial");
         setPrinter(nextPrinter || defaultPrinter?.id || "mock-printer-80mm");
+        setWorkstationId(nextWorkstationId || "CAJA-1");
         setScale(nextScale || defaultSerial?.id || "mock-scale-serial");
         setDrawer(nextDrawer || defaultPrinter?.id || defaultSerial?.id || "mock-drawer-escpos");
         setTaxEnabled(nextTaxEnabled !== "false");
@@ -179,6 +183,7 @@ export function SettingsView({
     const previewSettings = ticketPreviewDirty ? deriveTicketPreviewSettings(ticketPreviewDraft) : null;
     try {
       await setSetting("printer", printer);
+      await setSetting("workstation_id", workstationId.trim() || "CAJA-1");
       await setSetting("scale", scale);
       await setSetting("drawer", drawer);
       await setSetting("tax_enabled", String(taxEnabled));
@@ -208,15 +213,6 @@ export function SettingsView({
       }
       onTaxModeChange(true);
       showToast("Configuracion guardada");
-    } catch (error) {
-      showToast(String(error));
-    }
-  };
-
-  const backup = async () => {
-    try {
-      const result = await createBackup();
-      showToast(`Backup creado: ${result.path}`);
     } catch (error) {
       showToast(String(error));
     }
@@ -415,10 +411,14 @@ export function SettingsView({
             <div className="settings-section-title">
               <div>
                 <h2>Hardware</h2>
-                <p>Impresora, bascula, cajon y respaldo.</p>
+                <p>Impresora, bascula y cajon.</p>
               </div>
             </div>
             <div className="settings-grid">
+              <label>
+                Nombre de caja
+                <input value={workstationId} onChange={(event) => setWorkstationId(event.target.value)} placeholder="CAJA-1" />
+              </label>
               <label>
                 Impresora ticket
                 <select value={printer} onChange={(event) => setPrinter(event.target.value)}>
@@ -456,18 +456,18 @@ export function SettingsView({
               </button>
               <button className="ghost-button" type="button" onClick={() => readScale().then((result) => showToast(`${result.weight} ${result.unit}`)).catch((error) => showToast(String(error)))}>Probar bascula</button>
               <button className="ghost-button" type="button" onClick={() => openDrawer().then((result) => showToast(result.message)).catch((error) => showToast(String(error)))}>Probar cajon</button>
-              <button className="ghost-button" type="button" onClick={backup}>Crear backup</button>
             </div>
           </section>
+
         </div>
 
         <aside className="settings-side">
           <div className="settings-list">
+            <Setting icon={Archive} label="Caja/estacion" value={workstationId || "CAJA-1"} />
             <Setting icon={Printer} label="Impresora ticket" value={selectedDeviceName(printer)} />
             <Setting icon={Scale} label="Bascula" value={selectedDeviceName(scale)} />
             <Setting icon={Archive} label="Cajon" value={selectedDeviceName(drawer)} />
             <Setting icon={Percent} label="Impuestos" value={taxEnabled ? `${Math.round(taxDefaultRate * 100)}%, ${taxPricesIncludeTax ? "incluidos" : "sumados"}` : "Desactivados"} />
-            <Setting icon={ShieldCheck} label="Backup" value="SQLite local con copia manual" />
           </div>
           <div className="device-list">
             {devices.map((device) => (

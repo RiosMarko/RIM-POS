@@ -15,11 +15,12 @@ use crate::validation::{
     validate_positive, validate_required_text,
 };
 use chrono::Utc;
-use rusqlite::{params, types::Type, Connection, OptionalExtension};
+use rusqlite::{params, types::Type, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
@@ -199,6 +200,9 @@ struct ShiftCutSnapshot {
     opening_cash: f64,
     expected_cash: f64,
     closing_cash: Option<f64>,
+    counted_cash: Option<f64>,
+    cash_difference: Option<f64>,
+    difference_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -255,6 +259,59 @@ struct CashMovement {
     reason: String,
     actor_name: String,
     created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CashCountInput {
+    session_id: i64,
+    shift_id: Option<i64>,
+    count_type: String,
+    expected_cash: f64,
+    counted_cash: f64,
+    denominations_json: String,
+    difference_reason: Option<String>,
+    actor_id: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct CashCount {
+    id: i64,
+    session_id: i64,
+    shift_id: Option<i64>,
+    count_type: String,
+    expected_cash: f64,
+    counted_cash: f64,
+    difference: f64,
+    denominations_json: String,
+    difference_reason: Option<String>,
+    actor_name: String,
+    created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AuditLogEntry {
+    id: i64,
+    actor_name: Option<String>,
+    action: String,
+    entity: String,
+    entity_id: Option<i64>,
+    details: Option<String>,
+    created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct BackupFile {
+    path: String,
+    name: String,
+    size_bytes: u64,
+    created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct BackupRestoreResult {
+    restored_path: String,
+    safety_backup_path: String,
+    restored_at: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -483,6 +540,52 @@ fn setting_bool(conn: &Connection, key: &str, default: bool) -> CommandResult<bo
         .unwrap_or(default))
 }
 
+fn current_workstation_id(conn: &Connection) -> CommandResult<String> {
+    let fallback = env::var("COMPUTERNAME")
+        .or_else(|_| env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "CAJA-1".into());
+    Ok(setting_string(conn, "workstation_id")?
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(fallback)
+        .trim()
+        .chars()
+        .take(40)
+        .collect())
+}
+
+fn normalize_catalog_text(value: &str) -> String {
+    value
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|character| match character {
+            'á' | 'à' | 'ä' | 'â' => 'a',
+            'é' | 'è' | 'ë' | 'ê' => 'e',
+            'í' | 'ì' | 'ï' | 'î' => 'i',
+            'ó' | 'ò' | 'ö' | 'ô' => 'o',
+            'ú' | 'ù' | 'ü' | 'û' => 'u',
+            'ñ' => 'n',
+            other => other,
+        })
+        .filter(|character| character.is_ascii_alphanumeric() || character.is_whitespace())
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn normalize_catalog_code(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_lowercase()
+}
+
+fn product_search_text(sku: &str, barcode: &str, name: &str, category: &str, unit: &str) -> String {
+    normalize_catalog_text(&format!("{sku} {barcode} {name} {category} {unit}"))
+}
+
 fn line_amounts(
     gross_or_net: f64,
     discount: f64,
@@ -645,6 +748,7 @@ fn migrate(conn: &Connection) -> CommandResult<()> {
           min_stock REAL NOT NULL DEFAULT 0,
           tax_rate REAL NOT NULL DEFAULT 0,
           active INTEGER NOT NULL DEFAULT 1,
+          search_text TEXT NOT NULL DEFAULT '',
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
@@ -705,6 +809,7 @@ fn migrate(conn: &Connection) -> CommandResult<()> {
           closing_cash REAL,
           expected_cash REAL NOT NULL DEFAULT 0,
           sales_total REAL NOT NULL DEFAULT 0,
+          workstation_id TEXT NOT NULL DEFAULT 'CAJA-1',
           status TEXT NOT NULL DEFAULT 'open',
           FOREIGN KEY(opened_by) REFERENCES users(id)
         );
@@ -745,6 +850,23 @@ fn migrate(conn: &Connection) -> CommandResult<()> {
           actor_id INTEGER NOT NULL,
           created_at TEXT NOT NULL,
           FOREIGN KEY(session_id) REFERENCES cash_sessions(id),
+          FOREIGN KEY(actor_id) REFERENCES users(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS cash_counts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id INTEGER NOT NULL,
+          shift_id INTEGER,
+          count_type TEXT NOT NULL,
+          expected_cash REAL NOT NULL,
+          counted_cash REAL NOT NULL,
+          difference REAL NOT NULL,
+          denominations_json TEXT NOT NULL,
+          difference_reason TEXT,
+          actor_id INTEGER NOT NULL,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(session_id) REFERENCES cash_sessions(id),
+          FOREIGN KEY(shift_id) REFERENCES shifts(id),
           FOREIGN KEY(actor_id) REFERENCES users(id)
         );
 
@@ -950,6 +1072,12 @@ fn migrate(conn: &Connection) -> CommandResult<()> {
           locked_at TEXT NOT NULL,
           reason TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+          version INTEGER PRIMARY KEY,
+          name TEXT NOT NULL,
+          applied_at TEXT NOT NULL
+        );
         ",
     )
     .map_err(|error| error.to_string())?;
@@ -965,7 +1093,7 @@ fn migrate(conn: &Connection) -> CommandResult<()> {
     let _ = conn.execute("ALTER TABLE products ADD COLUMN sat_product_key TEXT", []);
     let _ = conn.execute("ALTER TABLE products ADD COLUMN sat_unit_key TEXT", []);
     let _ = conn.execute(
-        "ALTER TABLE products ADD COLUMN track_inventory INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE products ADD COLUMN search_text TEXT NOT NULL DEFAULT ''",
         [],
     );
     let _ = conn.execute("ALTER TABLE suppliers ADD COLUMN contact TEXT", []);
@@ -977,6 +1105,10 @@ fn migrate(conn: &Connection) -> CommandResult<()> {
     );
     let _ = conn.execute(
         "ALTER TABLE sales ADD COLUMN monthly_seq INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE cash_sessions ADD COLUMN workstation_id TEXT NOT NULL DEFAULT 'CAJA-1'",
         [],
     );
     let _ = conn.execute("ALTER TABLE sales ADD COLUMN shift_id INTEGER", []);
@@ -995,11 +1127,13 @@ fn migrate(conn: &Connection) -> CommandResult<()> {
         CREATE INDEX IF NOT EXISTS idx_products_active_name ON products(active, name);
         CREATE INDEX IF NOT EXISTS idx_products_active_category ON products(active, category);
         CREATE INDEX IF NOT EXISTS idx_products_active_stock ON products(active, stock);
+        CREATE INDEX IF NOT EXISTS idx_products_active_search ON products(active, search_text);
         CREATE INDEX IF NOT EXISTS idx_product_taxes_tax_id ON product_taxes(tax_id);
 
         CREATE INDEX IF NOT EXISTS idx_customer_credit_movements_customer_created
           ON customer_credit_movements(customer_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_cash_sessions_status_id ON cash_sessions(status, id);
+        CREATE INDEX IF NOT EXISTS idx_cash_sessions_workstation_status ON cash_sessions(workstation_id, status);
         CREATE INDEX IF NOT EXISTS idx_cash_sessions_opened_at ON cash_sessions(opened_at);
         CREATE INDEX IF NOT EXISTS idx_cash_sessions_closed_at ON cash_sessions(closed_at);
         CREATE INDEX IF NOT EXISTS idx_shifts_status_cash_session ON shifts(status, cash_session_id);
@@ -1008,6 +1142,10 @@ fn migrate(conn: &Connection) -> CommandResult<()> {
           ON cash_movements(session_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_cash_movements_actor_created
           ON cash_movements(actor_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_cash_counts_session_created
+          ON cash_counts(session_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_cash_counts_shift_created
+          ON cash_counts(shift_id, created_at);
 
         CREATE INDEX IF NOT EXISTS idx_sales_status_created_at ON sales(status, created_at);
         CREATE INDEX IF NOT EXISTS idx_sales_created_at ON sales(created_at);
@@ -1039,6 +1177,19 @@ fn migrate(conn: &Connection) -> CommandResult<()> {
         CREATE INDEX IF NOT EXISTS idx_invoices_stub_sale_id ON invoices_stub(sale_id);
         CREATE INDEX IF NOT EXISTS idx_invoices_stub_customer_id ON invoices_stub(customer_id);
         ",
+    )
+    .map_err(|error| error.to_string())?;
+    conn.execute(
+        "UPDATE products
+         SET search_text = lower(sku || ' ' || barcode || ' ' || name || ' ' || category || ' ' || unit)
+         WHERE search_text = ''",
+        [],
+    )
+    .map_err(|error| error.to_string())?;
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations (version, name, applied_at)
+         VALUES (1, 'base_local_pos_schema', ?1)",
+        params![now_iso()],
     )
     .map_err(|error| error.to_string())?;
     let _ = conn.execute(
@@ -1255,12 +1406,56 @@ fn seed_demo(conn: &Connection) -> CommandResult<()> {
                 6.0,
                 0.16,
             ),
+            ("SKU-ARROZ-1K", "7501000000011", "Arroz super extra 1 kg", "Abarrotes", "pieza", 32.0, 24.0, 20.0, 0.0, 0.0),
+            ("SKU-FRIJOL-1K", "7501000000028", "Frijol pinto 1 kg", "Abarrotes", "pieza", 42.0, 33.0, 18.0, 0.0, 0.0),
+            ("SKU-AZUCAR-1K", "7501000000035", "Azucar estandar 1 kg", "Abarrotes", "pieza", 30.0, 23.0, 24.0, 0.0, 0.0),
+            ("SKU-SAL-1K", "7501000000042", "Sal refinada 1 kg", "Abarrotes", "pieza", 18.0, 12.5, 18.0, 0.0, 0.0),
+            ("SKU-ACEITE-850", "7501000000059", "Aceite vegetal 850 ml", "Abarrotes", "pieza", 48.0, 39.0, 18.0, 0.0, 0.0),
+            ("SKU-ATUN-140", "7501000000066", "Atun en agua 140 g", "Abarrotes", "pieza", 24.0, 18.0, 30.0, 0.0, 0.0),
+            ("SKU-SARDINA-425", "7501000000073", "Sardina en tomate 425 g", "Abarrotes", "pieza", 36.0, 28.0, 14.0, 0.0, 0.0),
+            ("SKU-MAYONESA-390", "7501000000080", "Mayonesa 390 g", "Abarrotes", "pieza", 54.0, 42.0, 10.0, 0.0, 0.16),
+            ("SKU-CATSUP-370", "7501000000097", "Catsup 370 g", "Abarrotes", "pieza", 34.0, 25.0, 12.0, 0.0, 0.16),
+            ("SKU-PASTA-200", "7501000000103", "Pasta sopa codito 200 g", "Abarrotes", "pieza", 13.0, 9.0, 36.0, 0.0, 0.0),
+            ("SKU-GALLETA-MARIA", "7501000000110", "Galleta Maria 170 g", "Galletas", "pieza", 18.0, 13.0, 24.0, 0.0, 0.16),
+            ("SKU-GALLETA-SAL", "7501000000127", "Galleta salada 186 g", "Galletas", "pieza", 20.0, 15.0, 24.0, 0.0, 0.16),
+            ("SKU-PAN-CAJA", "7501000000134", "Pan blanco de caja", "Panaderia", "pieza", 48.0, 38.0, 8.0, 0.0, 0.0),
+            ("SKU-BIMB-ROLES", "7501000000141", "Roles glaseados paquete", "Panaderia", "pieza", 25.0, 18.0, 12.0, 0.0, 0.16),
+            ("SKU-AGUA-600", "7501000000158", "Agua natural 600 ml", "Bebidas", "pieza", 12.0, 7.0, 48.0, 0.0, 0.0),
+            ("SKU-AGUA-1L", "7501000000165", "Agua natural 1 L", "Bebidas", "pieza", 18.0, 11.0, 36.0, 0.0, 0.0),
+            ("SKU-JUGO-1L", "7501000000172", "Jugo naranja 1 L", "Bebidas", "pieza", 32.0, 24.0, 16.0, 0.0, 0.16),
+            ("SKU-SUERO-625", "7501000000189", "Suero oral 625 ml", "Bebidas", "pieza", 24.0, 17.0, 18.0, 0.0, 0.0),
+            ("SKU-CAFE-100", "7501000000196", "Cafe soluble 100 g", "Abarrotes", "pieza", 76.0, 60.0, 8.0, 0.0, 0.16),
+            ("SKU-CHOCOLATE", "7501000000202", "Chocolate en polvo 400 g", "Abarrotes", "pieza", 48.0, 36.0, 12.0, 0.0, 0.16),
+            ("SKU-LECHE-EVAP", "7501000000219", "Leche evaporada lata", "Lacteos", "pieza", 24.0, 18.0, 24.0, 0.0, 0.0),
+            ("SKU-CREMA-450", "7501000000226", "Crema acida 450 g", "Lacteos", "pieza", 42.0, 33.0, 10.0, 0.0, 0.0),
+            ("SKU-QUESO-200", "7501000000233", "Queso fresco 200 g", "Lacteos", "pieza", 44.0, 35.0, 10.0, 0.0, 0.0),
+            ("SKU-JAMON-250", "7501000000240", "Jamon de pavo 250 g", "Carnes frias", "pieza", 52.0, 42.0, 8.0, 0.0, 0.0),
+            ("SKU-SALCHICHA", "7501000000257", "Salchicha paquete 500 g", "Carnes frias", "pieza", 46.0, 36.0, 10.0, 0.0, 0.0),
+            ("SKU-PAPEL-4", "7501000000264", "Papel higienico 4 rollos", "Higiene", "pieza", 44.0, 34.0, 18.0, 0.0, 0.16),
+            ("SKU-SERVILLETAS", "7501000000271", "Servilletas paquete", "Higiene", "pieza", 22.0, 15.0, 20.0, 0.0, 0.16),
+            ("SKU-PASTA-DENTAL", "7501000000288", "Pasta dental 100 ml", "Higiene", "pieza", 36.0, 27.0, 14.0, 0.0, 0.16),
+            ("SKU-SHAMPOO", "7501000000295", "Shampoo familiar 750 ml", "Higiene", "pieza", 68.0, 52.0, 8.0, 0.0, 0.16),
+            ("SKU-DETERGENTE-1K", "7501000000301", "Detergente polvo 1 kg", "Limpieza", "pieza", 46.0, 34.0, 18.0, 0.0, 0.16),
+            ("SKU-CLORO-1L", "7501000000318", "Cloro 1 L", "Limpieza", "pieza", 18.0, 11.0, 24.0, 0.0, 0.16),
+            ("SKU-SUAVITEL-850", "7501000000325", "Suavizante 850 ml", "Limpieza", "pieza", 28.0, 20.0, 18.0, 0.0, 0.16),
+            ("SKU-FIBRA", "7501000000332", "Fibra esponja multiusos", "Limpieza", "pieza", 14.0, 8.0, 24.0, 0.0, 0.16),
+            ("SKU-PAPAS-45", "7501000000349", "Papas sal 45 g", "Botanas", "pieza", 17.0, 11.0, 30.0, 0.0, 0.24),
+            ("SKU-CACAHUATE", "7501000000356", "Cacahuate japones 100 g", "Botanas", "pieza", 18.0, 12.0, 24.0, 0.0, 0.24),
+            ("SKU-CHICHARRON", "7501000000363", "Chicharron harina bolsa", "Botanas", "pieza", 15.0, 9.0, 30.0, 0.0, 0.24),
+            ("SKU-CHICLE", "7501000000370", "Chicle paquete", "Dulces", "pieza", 12.0, 8.0, 30.0, 0.0, 0.16),
+            ("SKU-CHOCOLATE-BARRA", "7501000000387", "Chocolate barra", "Dulces", "pieza", 16.0, 11.0, 24.0, 0.0, 0.16),
+            ("SKU-PALETA", "7501000000394", "Paleta caramelo", "Dulces", "pieza", 5.0, 3.0, 60.0, 0.0, 0.16),
+            ("SKU-PILA-AA", "7501000000400", "Pilas AA paquete", "Varios", "pieza", 38.0, 27.0, 12.0, 0.0, 0.16),
+            ("SKU-VELA", "7501000000417", "Vela blanca pieza", "Varios", "pieza", 12.0, 7.0, 18.0, 0.0, 0.16),
+            ("SKU-FOCO", "7501000000424", "Foco led 9w", "Varios", "pieza", 32.0, 22.0, 12.0, 0.0, 0.16),
+            ("SKU-CIGARRO-SUELTO", "7501000000431", "Cigarro suelto", "Tabaco", "pieza", 8.0, 6.0, 100.0, 0.0, 0.16),
+            ("SKU-ENCENDEDOR", "7501000000448", "Encendedor", "Tabaco", "pieza", 18.0, 10.0, 18.0, 0.0, 0.16),
         ];
         for product in products {
             conn.execute(
                 "INSERT INTO products
-                (sku, barcode, name, category, unit, price, cost, stock, min_stock, tax_rate, active, created_at, updated_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?11)",
+                (sku, barcode, name, category, unit, price, cost, stock, min_stock, tax_rate, active, search_text, created_at, updated_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?12, ?12)",
                 params![
                     product.0,
                     product.1,
@@ -1272,6 +1467,7 @@ fn seed_demo(conn: &Connection) -> CommandResult<()> {
                     product.7,
                     product.8,
                     product.9,
+                    product_search_text(product.0, product.1, product.2, product.3, product.4),
                     now_iso()
                 ],
             )
@@ -1639,7 +1835,11 @@ fn product_search(
     limit: Option<i64>,
 ) -> CommandResult<Vec<Product>> {
     let limit = limit.unwrap_or(30).clamp(1, 100);
-    let like = format!("%{}%", query.trim());
+    let trimmed = query.trim();
+    let normalized = normalize_catalog_text(trimmed);
+    let normalized_code = normalize_catalog_code(trimmed);
+    let like = format!("%{}%", normalized);
+    let raw_like = format!("%{}%", trimmed.to_lowercase());
     let conn = state.db.lock().map_err(|error| error.to_string())?;
     require_active_user(&conn, actor_id)?;
     let mut stmt = conn
@@ -1647,13 +1847,29 @@ fn product_search(
             "SELECT id, sku, barcode, name, category, unit, price, cost, stock, min_stock, tax_rate, active
              FROM products
              WHERE active = 1
-               AND (?1 = '%%' OR barcode = ?2 OR sku LIKE ?1 OR name LIKE ?1 OR category LIKE ?1)
-             ORDER BY CASE WHEN barcode = ?2 THEN 0 ELSE 1 END, name
-             LIMIT ?3",
+               AND (?1 = ''
+                    OR barcode = ?2
+                    OR lower(sku) = ?3
+                    OR replace(lower(barcode), ' ', '') = ?3
+                    OR search_text LIKE ?4
+                    OR lower(name) LIKE ?5
+                    OR lower(category) LIKE ?5
+                    OR lower(sku) LIKE ?5)
+             ORDER BY
+               CASE
+                 WHEN barcode = ?2 OR lower(sku) = ?3 THEN 0
+                 WHEN search_text LIKE ?4 THEN 1
+                 ELSE 2
+               END,
+               name
+             LIMIT ?6",
         )
         .map_err(|error| error.to_string())?;
     let rows = stmt
-        .query_map(params![like, query.trim(), limit], map_product)
+        .query_map(
+            params![normalized, trimmed, normalized_code, like, raw_like, limit],
+            map_product,
+        )
         .map_err(|error| error.to_string())?;
     let mut products = rows
         .collect::<Result<Vec<_>, _>>()
@@ -1673,6 +1889,8 @@ fn product_upsert(
     let sku = input.sku.trim();
     let barcode = input.barcode.trim();
     let name = input.name.trim();
+    let category = input.category.trim();
+    let unit = input.unit.trim();
     validate_required_text(sku, 2, "Producto incompleto")?;
     validate_required_text(barcode, 2, "Producto incompleto")?;
     validate_required_text(name, 2, "Producto incompleto")?;
@@ -1690,20 +1908,21 @@ fn product_upsert(
             conn.execute(
                 "UPDATE products
                  SET sku = ?1, barcode = ?2, name = ?3, category = ?4, unit = ?5, price = ?6,
-                     cost = ?7, stock = ?8, min_stock = ?9, tax_rate = ?10, active = ?11, updated_at = ?12
-                 WHERE id = ?13",
+                     cost = ?7, stock = ?8, min_stock = ?9, tax_rate = ?10, active = ?11, search_text = ?12, updated_at = ?13
+                 WHERE id = ?14",
                 params![
                     sku,
                     barcode,
                     name,
-                    input.category.trim(),
-                    input.unit.trim(),
+                    category,
+                    unit,
                     input.price,
                     input.cost,
                     input.stock,
                     input.min_stock,
                     tax_rate,
                     active,
+                    product_search_text(sku, barcode, name, category, unit),
                     now,
                     id
                 ],
@@ -1714,20 +1933,21 @@ fn product_upsert(
         None => {
             conn.execute(
                 "INSERT INTO products
-                 (sku, barcode, name, category, unit, price, cost, stock, min_stock, tax_rate, active, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
+                 (sku, barcode, name, category, unit, price, cost, stock, min_stock, tax_rate, active, search_text, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
                 params![
                     sku,
                     barcode,
                     name,
-                    input.category.trim(),
-                    input.unit.trim(),
+                    category,
+                    unit,
                     input.price,
                     input.cost,
                     input.stock,
                     input.min_stock,
                     tax_rate,
                     active,
+                    product_search_text(sku, barcode, name, category, unit),
                     now
                 ],
             )
@@ -2575,7 +2795,8 @@ fn sale_create(state: State<'_, AppState>, draft: SaleDraft) -> CommandResult<Sa
     let tax_enabled = setting_bool(&conn, "tax_enabled", true)?;
     let prices_include_tax = true;
     let tx = conn.transaction().map_err(|error| error.to_string())?;
-    let (shift_id, cash_session_id) = get_open_shift(&tx)?
+    let workstation_id = current_workstation_id(&tx)?;
+    let (shift_id, cash_session_id) = get_open_shift(&tx, &workstation_id)?
         .ok_or_else(|| "No hay turno abierto para registrar venta".to_string())?;
 
     let mut subtotal = 0.0;
@@ -2920,10 +3141,11 @@ fn cash_session_open(
 ) -> CommandResult<CashSession> {
     let conn = state.db.lock().map_err(|error| error.to_string())?;
     require_active_user(&conn, opened_by)?;
+    let workstation_id = current_workstation_id(&conn)?;
     let existing: Option<i64> = conn
         .query_row(
-            "SELECT id FROM cash_sessions WHERE status = 'open' ORDER BY id DESC LIMIT 1",
-            [],
+            "SELECT id FROM cash_sessions WHERE status = 'open' AND workstation_id = ?1 ORDER BY id DESC LIMIT 1",
+            params![workstation_id],
             |row| row.get(0),
         )
         .optional()
@@ -2933,9 +3155,9 @@ fn cash_session_open(
     }
     let opened_at = now_iso();
     conn.execute(
-        "INSERT INTO cash_sessions (opened_by, opened_at, opening_cash, expected_cash, sales_total, status)
-         VALUES (?1, ?2, ?3, ?3, 0, 'open')",
-        params![opened_by, opened_at, opening_cash],
+        "INSERT INTO cash_sessions (opened_by, opened_at, opening_cash, expected_cash, sales_total, workstation_id, status)
+         VALUES (?1, ?2, ?3, ?3, 0, ?4, 'open')",
+        params![opened_by, opened_at, opening_cash, workstation_id],
     )
     .map_err(|error| error.to_string())?;
     let cash_session_id = conn.last_insert_rowid();
@@ -3048,6 +3270,121 @@ fn cash_movement_list(
         .map_err(|error| error.to_string())
 }
 
+fn map_cash_count(row: &rusqlite::Row<'_>) -> rusqlite::Result<CashCount> {
+    Ok(CashCount {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        shift_id: row.get(2)?,
+        count_type: row.get(3)?,
+        expected_cash: row.get(4)?,
+        counted_cash: row.get(5)?,
+        difference: row.get(6)?,
+        denominations_json: row.get(7)?,
+        difference_reason: row.get(8)?,
+        actor_name: row.get(9)?,
+        created_at: row.get(10)?,
+    })
+}
+
+fn create_cash_count_with_conn(conn: &Connection, input: &CashCountInput) -> CommandResult<CashCount> {
+    if !input.expected_cash.is_finite() || !input.counted_cash.is_finite() || input.counted_cash < 0.0 {
+        return Err("Arqueo invalido".into());
+    }
+    let count_type = match input.count_type.as_str() {
+        "audit" => "audit",
+        "close" => "close",
+        _ => return Err("Tipo de arqueo invalido".into()),
+    };
+    serde_json::from_str::<serde_json::Value>(&input.denominations_json)
+        .map_err(|_| "Denominaciones invalidas".to_string())?;
+    let difference = round_money(input.counted_cash - input.expected_cash);
+    let reason = input
+        .difference_reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if difference != 0.0 && reason.is_none() {
+        return Err("Motivo de diferencia requerido".into());
+    }
+    require_active_user(conn, input.actor_id)?;
+    let now = now_iso();
+    conn.execute(
+        "INSERT INTO cash_counts
+         (session_id, shift_id, count_type, expected_cash, counted_cash, difference, denominations_json, difference_reason, actor_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            input.session_id,
+            input.shift_id,
+            count_type,
+            round_money(input.expected_cash),
+            round_money(input.counted_cash),
+            difference,
+            input.denominations_json,
+            reason,
+            input.actor_id,
+            now
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    let id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO audit_log (actor_id, action, entity, entity_id, details, created_at)
+         VALUES (?1, ?2, 'cash_count', ?3, ?4, ?5)",
+        params![
+            input.actor_id,
+            if count_type == "close" { "cash_count_close" } else { "cash_count_audit" },
+            id,
+            format!("esperado {:.2}, contado {:.2}, diferencia {:.2}", input.expected_cash, input.counted_cash, difference),
+            now
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    conn.query_row(
+        "SELECT cc.id, cc.session_id, cc.shift_id, cc.count_type, cc.expected_cash, cc.counted_cash,
+                cc.difference, cc.denominations_json, cc.difference_reason, u.name, cc.created_at
+         FROM cash_counts cc
+         JOIN users u ON u.id = cc.actor_id
+         WHERE cc.id = ?1",
+        params![id],
+        map_cash_count,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn cash_count_create(
+    state: State<'_, AppState>,
+    input: CashCountInput,
+) -> CommandResult<CashCount> {
+    let conn = state.db.lock().map_err(|error| error.to_string())?;
+    create_cash_count_with_conn(&conn, &input)
+}
+
+#[tauri::command]
+fn cash_count_list(
+    state: State<'_, AppState>,
+    actor_id: i64,
+    session_id: i64,
+) -> CommandResult<Vec<CashCount>> {
+    let conn = state.db.lock().map_err(|error| error.to_string())?;
+    require_active_user(&conn, actor_id)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT cc.id, cc.session_id, cc.shift_id, cc.count_type, cc.expected_cash, cc.counted_cash,
+                    cc.difference, cc.denominations_json, cc.difference_reason, u.name, cc.created_at
+             FROM cash_counts cc
+             JOIN users u ON u.id = cc.actor_id
+             WHERE cc.session_id = ?1
+             ORDER BY cc.id DESC",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map(params![session_id], map_cash_count)
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 fn cash_session_close(
     state: State<'_, AppState>,
@@ -3068,9 +3405,12 @@ fn shift_cut_x(
     require_active_user(&conn, actor_id)?;
     let next_shift_id = match shift_id {
         Some(id) => id,
-        None => get_open_shift(&conn)?
-            .map(|(id, _)| id)
-            .ok_or_else(|| "No hay turno abierto".to_string())?,
+        None => {
+            let workstation_id = current_workstation_id(&conn)?;
+            get_open_shift(&conn, &workstation_id)?
+                .map(|(id, _)| id)
+                .ok_or_else(|| "No hay turno abierto".to_string())?
+        }
     };
     calculate_shift_cut(&conn, next_shift_id)
 }
@@ -3081,6 +3421,8 @@ fn shift_cut_z(
     shift_id: i64,
     closing_cash: f64,
     closed_by: i64,
+    denominations_json: Option<String>,
+    difference_reason: Option<String>,
 ) -> CommandResult<ShiftCutSnapshot> {
     if closing_cash < 0.0 {
         return Err("Efectivo contado invalido".into());
@@ -3099,10 +3441,35 @@ fn shift_cut_z(
         return Err("Corte Z ya fue aplicado a este turno".into());
     }
     let mut snapshot = calculate_shift_cut(&tx, shift_id)?;
+    let difference = round_money(closing_cash - snapshot.expected_cash);
+    let reason = difference_reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if difference != 0.0 && reason.is_none() {
+        return Err("Motivo de diferencia requerido".into());
+    }
+    let denominations_json = denominations_json.unwrap_or_else(|| "[]".into());
+    create_cash_count_with_conn(
+        &tx,
+        &CashCountInput {
+            session_id: cash_session_id,
+            shift_id: Some(shift_id),
+            count_type: "close".into(),
+            expected_cash: snapshot.expected_cash,
+            counted_cash: closing_cash,
+            denominations_json: denominations_json.clone(),
+            difference_reason: reason.map(str::to_string),
+            actor_id: closed_by,
+        },
+    )?;
     let closed_at = now_iso();
     snapshot.status = "closed".into();
     snapshot.closed_at = Some(closed_at.clone());
     snapshot.closing_cash = Some(round_money(closing_cash));
+    snapshot.counted_cash = Some(round_money(closing_cash));
+    snapshot.cash_difference = Some(difference);
+    snapshot.difference_reason = reason.map(str::to_string);
     let snapshot_json = serde_json::to_string(&snapshot).map_err(|error| error.to_string())?;
     tx.execute(
         "UPDATE shifts
@@ -3210,6 +3577,107 @@ fn monthly_sales_report(
 }
 
 #[tauri::command]
+fn shift_cut_history(
+    state: State<'_, AppState>,
+    actor_id: i64,
+    limit: Option<i64>,
+) -> CommandResult<Vec<ShiftCutSnapshot>> {
+    let limit = limit.unwrap_or(20).clamp(1, 100);
+    let conn = state.db.lock().map_err(|error| error.to_string())?;
+    require_active_user(&conn, actor_id)?;
+    let mut stmt = conn
+        .prepare("SELECT id FROM shifts ORDER BY id DESC LIMIT ?1")
+        .map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map(params![limit], |row| row.get::<_, i64>(0))
+        .map_err(|error| error.to_string())?;
+    let mut cuts = Vec::new();
+    for row in rows {
+        cuts.push(calculate_shift_cut(&conn, row.map_err(|error| error.to_string())?)?);
+    }
+    Ok(cuts)
+}
+
+fn shift_cut_text(conn: &Connection, shift_id: i64) -> CommandResult<String> {
+    let snapshot = calculate_shift_cut(conn, shift_id)?;
+    let store_name = ticket_setting(conn, "ticket_store_name", "RIM-POS")?;
+    let width = ticket_setting_i64(conn, "ticket_width", 32, 24, 48)? as usize;
+    let separator = ticket_separator(width);
+    let mut text = String::new();
+    text.push_str(&format!("{store_name}\nCORTE {}\n{separator}\n", snapshot.shift_id));
+    text.push_str(&format!("Apertura: {}\n", snapshot.opened_at));
+    if let Some(closed_at) = &snapshot.closed_at {
+        text.push_str(&format!("Cierre: {closed_at}\n"));
+    }
+    text.push_str(&format!("Tickets: {}\n", snapshot.total_tickets));
+    text.push_str(&format!("Cancelados: {}\n", snapshot.canceled_tickets));
+    text.push_str(&format!("Ventas netas: ${:.2}\n", snapshot.net_sales));
+    text.push_str(&format!("Efectivo: ${:.2}\n", snapshot.cash_paid));
+    text.push_str(&format!("Tarjeta: ${:.2}\n", snapshot.card_paid));
+    text.push_str(&format!("Credito: ${:.2}\n", snapshot.transfer_paid));
+    text.push_str(&format!("Fondo inicial: ${:.2}\n", snapshot.opening_cash));
+    text.push_str(&format!("Esperado: ${:.2}\n", snapshot.expected_cash));
+    if let Some(counted) = snapshot.counted_cash.or(snapshot.closing_cash) {
+        text.push_str(&format!("Contado: ${counted:.2}\n"));
+        text.push_str(&format!("Diferencia: ${:.2}\n", counted - snapshot.expected_cash));
+    }
+    text.push_str(&format!("{separator}\n"));
+    Ok(text)
+}
+
+#[tauri::command]
+fn print_shift_cut(state: State<'_, AppState>, actor_id: i64, shift_id: i64) -> CommandResult<HardwareResult> {
+    let conn = state.db.lock().map_err(|error| error.to_string())?;
+    require_active_user(&conn, actor_id)?;
+    let printer = ticket_setting(&conn, "printer", "")?;
+    let text = shift_cut_text(&conn, shift_id)?;
+    drop(conn);
+    let file = temp_hardware_file("rim-pos-cut", "txt");
+    fs::write(&file, text).map_err(|error| error.to_string())?;
+    run_print_file(&printer, &file, false)?;
+    let _ = fs::remove_file(file);
+    Ok(HardwareResult {
+        ok: true,
+        message: format!("Corte {shift_id} enviado a impresora"),
+    })
+}
+
+#[tauri::command]
+fn audit_log_list(
+    state: State<'_, AppState>,
+    actor_id: i64,
+    limit: Option<i64>,
+) -> CommandResult<Vec<AuditLogEntry>> {
+    let limit = limit.unwrap_or(80).clamp(1, 300);
+    let conn = state.db.lock().map_err(|error| error.to_string())?;
+    require_admin(&conn, actor_id)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT a.id, u.name, a.action, a.entity, a.entity_id, a.details, a.created_at
+             FROM audit_log a
+             LEFT JOIN users u ON u.id = a.actor_id
+             ORDER BY a.id DESC
+             LIMIT ?1",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map(params![limit], |row| {
+            Ok(AuditLogEntry {
+                id: row.get(0)?,
+                actor_name: row.get(1)?,
+                action: row.get(2)?,
+                entity: row.get(3)?,
+                entity_id: row.get(4)?,
+                details: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn period_lock(
     state: State<'_, AppState>,
     actor_id: i64,
@@ -3266,15 +3734,15 @@ fn get_cash_session(conn: &Connection, id: i64) -> CommandResult<CashSession> {
     .map_err(|error| error.to_string())
 }
 
-fn get_open_shift(conn: &Connection) -> CommandResult<Option<(i64, i64)>> {
+fn get_open_shift(conn: &Connection, workstation_id: &str) -> CommandResult<Option<(i64, i64)>> {
     conn.query_row(
         "SELECT sh.id, sh.cash_session_id
          FROM shifts sh
          JOIN cash_sessions cs ON cs.id = sh.cash_session_id
-         WHERE sh.status = 'open' AND cs.status = 'open'
+         WHERE sh.status = 'open' AND cs.status = 'open' AND cs.workstation_id = ?1
          ORDER BY sh.id DESC
          LIMIT 1",
-        [],
+        params![workstation_id],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )
     .optional()
@@ -3377,6 +3845,9 @@ fn calculate_shift_cut(conn: &Connection, shift_id: i64) -> CommandResult<ShiftC
         opening_cash: round_money(opening_cash),
         expected_cash: round_money(expected_cash),
         closing_cash: closing_cash.map(round_money),
+        counted_cash: closing_cash.map(round_money),
+        cash_difference: closing_cash.map(|value| round_money(value - expected_cash)),
+        difference_reason: None,
     })
 }
 
@@ -3384,6 +3855,7 @@ fn calculate_shift_cut(conn: &Connection, shift_id: i64) -> CommandResult<ShiftC
 fn dashboard_summary(state: State<'_, AppState>, actor_id: i64) -> CommandResult<DashboardSummary> {
     let conn = state.db.lock().map_err(|error| error.to_string())?;
     require_active_user(&conn, actor_id)?;
+    let workstation_id = current_workstation_id(&conn)?;
     let active_products = conn
         .query_row(
             "SELECT COUNT(*) FROM products WHERE active = 1",
@@ -3414,8 +3886,8 @@ fn dashboard_summary(state: State<'_, AppState>, actor_id: i64) -> CommandResult
         .map_err(|error| error.to_string())?;
     let open_cash_session_id: Option<i64> = conn
         .query_row(
-            "SELECT id FROM cash_sessions WHERE status = 'open' ORDER BY id DESC LIMIT 1",
-            [],
+            "SELECT id FROM cash_sessions WHERE status = 'open' AND workstation_id = ?1 ORDER BY id DESC LIMIT 1",
+            params![workstation_id],
             |row| row.get(0),
         )
         .optional()
@@ -3437,6 +3909,7 @@ fn dashboard_summary(state: State<'_, AppState>, actor_id: i64) -> CommandResult
 fn report_summary(state: State<'_, AppState>, actor_id: i64) -> CommandResult<ReportSummary> {
     let conn = state.db.lock().map_err(|error| error.to_string())?;
     require_permission(&conn, actor_id, "reports")?;
+    let workstation_id = current_workstation_id(&conn)?;
     let (today_sales, today_tickets): (f64, i64) = conn
         .query_row(
             "SELECT COALESCE(SUM(total), 0), COUNT(*)
@@ -3459,8 +3932,8 @@ fn report_summary(state: State<'_, AppState>, actor_id: i64) -> CommandResult<Re
         .map_err(|error| error.to_string())?;
     let cash_expected = conn
         .query_row(
-            "SELECT COALESCE(expected_cash, 0) FROM cash_sessions WHERE status = 'open' ORDER BY id DESC LIMIT 1",
-            [],
+            "SELECT COALESCE(expected_cash, 0) FROM cash_sessions WHERE status = 'open' AND workstation_id = ?1 ORDER BY id DESC LIMIT 1",
+            params![workstation_id],
             |row| row.get(0),
         )
         .optional()
@@ -3978,6 +4451,28 @@ fn run_print_file(printer: &str, file: &PathBuf, raw: bool) -> CommandResult<()>
     }
 }
 
+fn write_raw_device(device: &str, bytes: &[u8]) -> CommandResult<bool> {
+    let device = clean_device_text(device);
+    if device.is_empty() || device.starts_with("mock-") {
+        return Ok(false);
+    }
+    let direct = device.starts_with("/dev/")
+        || device.to_ascii_uppercase().starts_with("COM")
+        || device.starts_with("\\\\.\\");
+    if !direct {
+        return Ok(false);
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .open(&device)
+        .map_err(|error| format!("No se pudo abrir dispositivo {device}: {error}"))?;
+    file.write_all(bytes)
+        .map_err(|error| format!("No se pudo escribir a {device}: {error}"))?;
+    file.flush()
+        .map_err(|error| format!("No se pudo cerrar envio a {device}: {error}"))?;
+    Ok(true)
+}
+
 fn ticket_setting(conn: &Connection, key: &str, default: &str) -> CommandResult<String> {
     Ok(setting_string(conn, key)?.unwrap_or_else(|| default.to_string()))
 }
@@ -4168,8 +4663,15 @@ fn open_cash_drawer(state: State<'_, AppState>) -> CommandResult<HardwareResult>
     let drawer = setting_string(&conn, "drawer")?
         .or_else(|| setting_string(&conn, "printer").ok().flatten())
         .unwrap_or_default();
+    let pulse = [0x1B, 0x70, 0x00, 0x40, 0x50];
+    if write_raw_device(&drawer, &pulse)? {
+        return Ok(HardwareResult {
+            ok: true,
+            message: format!("Pulso de cajon enviado directo a {drawer}"),
+        });
+    }
     let file = temp_hardware_file("rim-pos-drawer", "bin");
-    fs::write(&file, [0x1B, 0x70, 0x00, 0x40, 0x50])
+    fs::write(&file, pulse)
         .map_err(|error| format!("No se pudo crear pulso de cajon: {error}"))?;
     run_print_file(&drawer, &file, true)?;
     let _ = fs::remove_file(file);
@@ -4242,6 +4744,147 @@ fn backup_create(state: State<'_, AppState>, actor_id: i64) -> CommandResult<Bac
     let conn = state.db.lock().map_err(|error| error.to_string())?;
     require_admin(&conn, actor_id)?;
     backup_create_with_conn(&conn, &state.db_path)
+}
+
+fn backup_dir_for(db_path: &PathBuf) -> CommandResult<PathBuf> {
+    db_path
+        .parent()
+        .ok_or_else(|| "Ruta DB invalida".to_string())
+        .map(|path| path.join("backups"))
+}
+
+fn sidecar_path(db_path: &PathBuf, suffix: &str) -> PathBuf {
+    PathBuf::from(format!("{}{}", db_path.to_string_lossy(), suffix))
+}
+
+fn validate_restore_backup(db_path: &PathBuf, path: &str) -> CommandResult<PathBuf> {
+    let backup_dir = backup_dir_for(db_path)?;
+    let backup_dir = backup_dir
+        .canonicalize()
+        .map_err(|_| "Carpeta de backups no disponible".to_string())?;
+    let requested = PathBuf::from(path)
+        .canonicalize()
+        .map_err(|_| "Backup no encontrado".to_string())?;
+    if !requested.starts_with(&backup_dir) {
+        return Err("Backup fuera de carpeta segura".into());
+    }
+    let name = requested
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if !name.starts_with("pos-backup-") || !name.ends_with(".sqlite3") {
+        return Err("Archivo backup invalido".into());
+    }
+    let validation = Connection::open_with_flags(&requested, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| format!("Backup no abre: {error}"))?;
+    let integrity: String = validation
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(|error| format!("Backup no se pudo validar: {error}"))?;
+    if integrity != "ok" {
+        return Err(format!("Backup dañado: {integrity}"));
+    }
+    for table in ["users", "products", "sales", "app_settings"] {
+        let exists: Option<String> = validation
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                params![table],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if exists.is_none() {
+            return Err(format!("Backup no parece ser de RIM-POS: falta {table}"));
+        }
+    }
+    Ok(requested)
+}
+
+#[tauri::command]
+fn backup_restore(
+    state: State<'_, AppState>,
+    actor_id: i64,
+    path: String,
+) -> CommandResult<BackupRestoreResult> {
+    let requested = validate_restore_backup(&state.db_path, &path)?;
+    let restored_at = now_iso();
+    let temp_restore = state.db_path.with_extension("restore-tmp");
+    fs::copy(&requested, &temp_restore)
+        .map_err(|error| format!("No se pudo preparar restauracion: {error}"))?;
+
+    let mut conn = state.db.lock().map_err(|error| error.to_string())?;
+    require_admin(&conn, actor_id)?;
+    let safety_backup = backup_create_with_conn(&conn, &state.db_path)?;
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .map_err(|error| error.to_string())?;
+
+    let memory_conn = Connection::open_in_memory().map_err(|error| error.to_string())?;
+    let old_conn = std::mem::replace(&mut *conn, memory_conn);
+    drop(old_conn);
+
+    let wal_path = sidecar_path(&state.db_path, "-wal");
+    let shm_path = sidecar_path(&state.db_path, "-shm");
+    let _ = fs::remove_file(&wal_path);
+    let _ = fs::remove_file(&shm_path);
+
+    let restore_result = fs::copy(&temp_restore, &state.db_path);
+    let _ = fs::remove_file(&temp_restore);
+    if let Err(error) = restore_result {
+        let _ = fs::copy(&safety_backup.path, &state.db_path);
+        let reopened = Connection::open(&state.db_path).map_err(|open_error| {
+            format!("Restore fallo: {error}. Reabrir backup de seguridad fallo: {open_error}")
+        })?;
+        migrate(&reopened)?;
+        *conn = reopened;
+        return Err(format!("No se pudo restaurar backup: {error}"));
+    }
+
+    let reopened = Connection::open(&state.db_path).map_err(|error| error.to_string())?;
+    migrate(&reopened)?;
+    let _ = reopened.execute(
+        "INSERT INTO audit_log (actor_id, action, entity, entity_id, details, created_at)
+         VALUES (NULL, 'restore', 'backup', NULL, ?1, ?2)",
+        params![requested.to_string_lossy().to_string(), restored_at],
+    );
+    *conn = reopened;
+
+    Ok(BackupRestoreResult {
+        restored_path: requested.to_string_lossy().to_string(),
+        safety_backup_path: safety_backup.path,
+        restored_at,
+    })
+}
+
+#[tauri::command]
+fn backup_list(state: State<'_, AppState>, actor_id: i64) -> CommandResult<Vec<BackupFile>> {
+    let conn = state.db.lock().map_err(|error| error.to_string())?;
+    require_admin(&conn, actor_id)?;
+    let backup_dir = backup_dir_for(&state.db_path)?;
+    let mut files = Vec::new();
+    if !backup_dir.exists() {
+        return Ok(files);
+    }
+    for entry in fs::read_dir(backup_dir).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("pos-backup-") || !name.ends_with(".sqlite3") {
+            continue;
+        }
+        let metadata = entry.metadata().map_err(|error| error.to_string())?;
+        files.push(BackupFile {
+            path: path.to_string_lossy().to_string(),
+            name,
+            size_bytes: metadata.len(),
+            created_at: metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| chrono::DateTime::<Utc>::from(std::time::UNIX_EPOCH + duration).to_rfc3339())
+                .unwrap_or_else(now_iso),
+        });
+    }
+    files.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    Ok(files)
 }
 
 #[tauri::command]
@@ -4397,14 +5040,19 @@ pub fn run() {
             cash_session_close,
             shift_cut_x,
             shift_cut_z,
+            shift_cut_history,
+            print_shift_cut,
             cash_movement_create,
             cash_movement_list,
+            cash_count_create,
+            cash_count_list,
             dashboard_summary,
             report_summary,
             report_product_sales,
             report_movement_history,
             monthly_sales_report,
             period_lock,
+            audit_log_list,
             hardware_device_list,
             print_ticket,
             open_cash_drawer,
@@ -4412,6 +5060,8 @@ pub fn run() {
             settings_get,
             settings_set,
             backup_create,
+            backup_list,
+            backup_restore,
             backup_auto_if_due
         ])
         .run(tauri::generate_context!())

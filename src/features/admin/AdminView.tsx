@@ -1,4 +1,5 @@
 import type { ConfirmDraft } from "../../components/modals/CommonModals";
+import { AdministrationView } from "./AdministrationView";
 import { CashView } from "../cash/CashView";
 import { CustomersView } from "../customers/CustomersView";
 import { InventoryView } from "../inventory/InventoryView";
@@ -70,6 +71,7 @@ export function AdminView({
   if (view === "invoices") return <InvoicesView showToast={showToast} />;
 
   if (view === "settings") return <SettingsView showToast={showToast} onTaxModeChange={onTaxModeChange} />;
+  if (view === "administration") return <AdministrationView showToast={showToast} />;
 
   return <CustomersView showToast={showToast} />;
 }

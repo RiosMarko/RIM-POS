@@ -20,6 +20,7 @@ export function SaleView({
   activeHeldTicketId,
   selectedCartProductId,
   busy,
+  hasOpenCash,
   searchRef,
   cashRef,
   setQuery,
@@ -54,6 +55,7 @@ export function SaleView({
   activeHeldTicketId: number | null;
   selectedCartProductId: number | null;
   busy: boolean;
+  hasOpenCash: boolean;
   searchRef: RefObject<HTMLInputElement>;
   cashRef: RefObject<HTMLInputElement>;
   setQuery: (value: string) => void;
@@ -309,9 +311,9 @@ export function SaleView({
           <strong>{money(shortage > 0 ? shortage : change)}</strong>
         </div>
 
-        <button className="pay-button" type="button" disabled={busy || cart.length === 0} onClick={() => completeSale()}>
+        <button className="pay-button" type="button" disabled={busy || cart.length === 0 || !hasOpenCash} onClick={() => completeSale()}>
           <CircleDollarSign size={24} />
-          Cobrar venta
+          {hasOpenCash ? "Cobrar venta" : "Abre caja primero"}
           <kbd>F1/F2</kbd>
         </button>
 

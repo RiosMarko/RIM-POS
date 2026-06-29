@@ -32,6 +32,8 @@ export function getNotificationTone(message: string): NotificationTone {
     normalized.includes("actualizad") ||
     normalized.includes("eliminad") ||
     normalized.includes("aplicad") ||
+    normalized.includes("restablecid") ||
+    normalized.includes("restaurad") ||
     normalized.includes("autorizado")
   ) {
     return "success";

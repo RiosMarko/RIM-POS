@@ -10,7 +10,8 @@ export type ViewKey =
   | "purchases"
   | "invoices"
   | "users"
-  | "settings";
+  | "settings"
+  | "administration";
 
 export type NavItem<IconType> = {
   key: ViewKey;

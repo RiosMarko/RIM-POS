@@ -1,7 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   ActiveSaleDraft,
+  AuditLogEntry,
+  BackupFile,
+  BackupRestoreResult,
   BackupResult,
+  CashCount,
   CashMovement,
   CashSession,
   Customer,
@@ -193,6 +197,8 @@ let mockSales: SaleListItem[] = [];
 let mockSaleItems = new Map<number, Array<{ product_id: number; quantity: number }>>();
 let mockInventoryMovements: InventoryMovement[] = [];
 let mockCashMovements: CashMovement[] = [];
+let mockCashCounts: CashCount[] = [];
+let mockCashCountId = 1;
 let mockCustomerCreditMovementId = 1;
 let mockCustomerCreditMovements: Array<{
   id: number;
@@ -892,6 +898,9 @@ function mockShiftCut(status = mockCashSession?.status ?? "closed"): ShiftCutSna
     opening_cash: mockCashSession.opening_cash,
     expected_cash: mockCashSession.expected_cash,
     closing_cash: mockCashSession.closing_cash ?? null,
+    counted_cash: mockCashSession.closing_cash ?? null,
+    cash_difference: mockCashSession.closing_cash == null ? null : mockCashSession.closing_cash - mockCashSession.expected_cash,
+    difference_reason: null,
   };
 }
 
@@ -902,19 +911,101 @@ export async function getShiftCutX(shiftId?: number): Promise<ShiftCutSnapshot> 
   return mockShiftCut("open");
 }
 
-export async function closeShiftCutZ(input: { shift_id: number; closing_cash: number; closed_by: number }): Promise<ShiftCutSnapshot> {
+export async function closeShiftCutZ(input: {
+  shift_id: number;
+  closing_cash: number;
+  closed_by: number;
+  denominations_json?: string;
+  difference_reason?: string | null;
+}): Promise<ShiftCutSnapshot> {
   if (isTauri()) {
-    return call<ShiftCutSnapshot>("shift_cut_z", { shiftId: input.shift_id, closingCash: input.closing_cash, closedBy: input.closed_by });
+    return call<ShiftCutSnapshot>("shift_cut_z", {
+      shiftId: input.shift_id,
+      closingCash: input.closing_cash,
+      closedBy: input.closed_by,
+      denominationsJson: input.denominations_json ?? "[]",
+      differenceReason: input.difference_reason ?? null,
+    });
   }
   if (!mockCashSession || mockCashSession.status !== "open") throw new Error("No hay turno abierto");
+  const difference = input.closing_cash - mockCashSession.expected_cash;
+  if (difference !== 0 && !input.difference_reason?.trim()) throw new Error("Motivo de diferencia requerido");
   mockCashSession = {
     ...mockCashSession,
     closed_at: new Date().toISOString(),
     closing_cash: input.closing_cash,
     status: "closed",
   };
+  mockCashCounts.unshift({
+    id: mockCashCountId,
+    session_id: mockCashSession.id,
+    shift_id: input.shift_id,
+    count_type: "close",
+    expected_cash: mockCashSession.expected_cash,
+    counted_cash: input.closing_cash,
+    difference,
+    denominations_json: input.denominations_json ?? "[]",
+    difference_reason: input.difference_reason ?? null,
+    actor_name: mockUsers.find((user) => user.id === input.closed_by)?.name ?? "Cajero",
+    created_at: new Date().toISOString(),
+  });
+  mockCashCountId += 1;
   mockLastCutZ = mockShiftCut("closed");
   return mockLastCutZ;
+}
+
+export async function createCashCount(input: {
+  session_id: number;
+  shift_id?: number | null;
+  count_type: "audit" | "close";
+  expected_cash: number;
+  counted_cash: number;
+  denominations_json: string;
+  difference_reason?: string | null;
+  actor_id: number;
+}): Promise<CashCount> {
+  if (isTauri()) {
+    return call<CashCount>("cash_count_create", { input });
+  }
+  const difference = input.counted_cash - input.expected_cash;
+  if (difference !== 0 && !input.difference_reason?.trim()) throw new Error("Motivo de diferencia requerido");
+  const count: CashCount = {
+    id: mockCashCountId,
+    session_id: input.session_id,
+    shift_id: input.shift_id ?? null,
+    count_type: input.count_type,
+    expected_cash: input.expected_cash,
+    counted_cash: input.counted_cash,
+    difference,
+    denominations_json: input.denominations_json,
+    difference_reason: input.difference_reason ?? null,
+    actor_name: mockUsers.find((user) => user.id === input.actor_id)?.name ?? "Cajero",
+    created_at: new Date().toISOString(),
+  };
+  mockCashCountId += 1;
+  mockCashCounts.unshift(count);
+  return count;
+}
+
+export async function listCashCounts(sessionId: number): Promise<CashCount[]> {
+  if (isTauri()) {
+    return call<CashCount[]>("cash_count_list", { actorId: requireActorId(), sessionId });
+  }
+  return mockCashCounts.filter((count) => count.session_id === sessionId);
+}
+
+export async function listShiftCuts(): Promise<ShiftCutSnapshot[]> {
+  if (isTauri()) {
+    return call<ShiftCutSnapshot[]>("shift_cut_history", { actorId: requireActorId(), limit: 30 });
+  }
+  return mockLastCutZ ? [mockLastCutZ] : mockCashSession ? [mockShiftCut(mockCashSession.status)] : [];
+}
+
+export async function printShiftCut(shiftId: number): Promise<HardwareResult> {
+  if (isTauri()) {
+    return call<HardwareResult>("print_shift_cut", { actorId: requireActorId(), shiftId });
+  }
+  return { ok: true, message: `Demo navegador: corte ${shiftId}` };
 }
 
 export async function getMonthlySalesReport(month?: string): Promise<MonthlySalesReport[]> {
@@ -1071,6 +1162,31 @@ export async function createBackup(): Promise<BackupResult> {
     return call<BackupResult>("backup_create", { actorId: requireActorId() });
   }
   return { path: "Mock: navegador no escribe backup SQLite", created_at: new Date().toISOString() };
+}
+
+export async function listBackups(): Promise<BackupFile[]> {
+  if (isTauri()) {
+    return call<BackupFile[]>("backup_list", { actorId: requireActorId() });
+  }
+  return [];
+}
+
+export async function restoreBackup(path: string): Promise<BackupRestoreResult> {
+  if (isTauri()) {
+    return call<BackupRestoreResult>("backup_restore", { actorId: requireActorId(), path });
+  }
+  return {
+    restored_path: path,
+    safety_backup_path: "Mock: backup de seguridad navegador",
+    restored_at: new Date().toISOString(),
+  };
+}
+
+export async function listAuditLog(): Promise<AuditLogEntry[]> {
+  if (isTauri()) {
+    return call<AuditLogEntry[]>("audit_log_list", { actorId: requireActorId(), limit: 80 });
+  }
+  return [];
 }
 
 export async function createAutoBackupIfDue(): Promise<BackupResult | null> {

@@ -3,6 +3,7 @@ import {
   BarChart3,
   Barcode,
   Boxes,
+  DatabaseBackup,
   PackagePlus,
   Settings,
   ShoppingCart,
@@ -73,6 +74,7 @@ const navItems: Array<NavItem<typeof ShoppingCart>> = [
   { key: "purchases", label: "Compras", icon: PackagePlus, adminOnly: true, permission: "purchases" },
   { key: "users", label: "Usuarios", icon: UserPlus, adminOnly: true },
   { key: "settings", label: "Config", icon: Settings, adminOnly: true },
+  { key: "administration", label: "Administracion", icon: DatabaseBackup, adminOnly: true },
 ];
 
 const ACTIVE_DRAFT_SAVE_DELAY_MS = 3000;
@@ -176,6 +178,11 @@ function App() {
 
   useEffect(() => {
     if (!session) return;
+    const restoreMessage = window.localStorage.getItem("rim-pos-post-restore-message");
+    if (restoreMessage) {
+      window.localStorage.removeItem("rim-pos-post-restore-message");
+      window.setTimeout(() => showToast(restoreMessage), 250);
+    }
     if (!autoBackupCheckedRef.current) {
       autoBackupCheckedRef.current = true;
       createAutoBackupIfDue()
@@ -253,6 +260,10 @@ function App() {
     if (!session) return;
     if (cart.length === 0) {
       showToast("Agrega articulos");
+      return;
+    }
+    if (!summary?.open_cash_session) {
+      showToast("Abre caja antes de vender");
       return;
     }
     if (paid < totals.total) {
@@ -696,6 +707,7 @@ function App() {
               activeHeldTicketId={activeHeldTicketId}
               selectedCartProductId={selectedCartProductId}
               busy={busy}
+              hasOpenCash={Boolean(summary?.open_cash_session)}
               searchRef={searchRef}
               cashRef={cashRef}
               setQuery={setQuery}

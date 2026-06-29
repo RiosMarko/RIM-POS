@@ -383,7 +383,7 @@ button:active {
   z-index: var(--z-window-cover);
   display: grid;
   place-items: center;
-  background: white;
+  background: color-mix(in oklab, white 92%, var(--surface) 8%);
   pointer-events: all;
   animation: window-cover-in 130ms ease-out both;
 }
@@ -392,11 +392,52 @@ button:active {
   animation: window-cover-out 180ms ease-in both;
 }
 
-.window-transition-cover img {
+.window-transition-loader {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  min-width: 210px;
+  padding: 24px;
+  border: 1px solid var(--line-strong);
+  border-radius: 18px;
+  background: white;
+  color: var(--ink);
+  box-shadow: var(--shadow-tight);
+}
+
+.window-transition-loader img {
   width: 58px;
   height: 58px;
   border-radius: 14px;
-  box-shadow: var(--shadow-tight);
+}
+
+.window-transition-loader strong {
+  font-size: 1.05rem;
+  font-weight: 900;
+}
+
+.window-transition-loader span:not(.window-transition-spinner) {
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.window-transition-spinner {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 26px;
+  height: 26px;
+  border: 3px solid var(--surface-strong);
+  border-top-color: var(--accent);
+  border-radius: 999px;
+  animation: transition-spinner 780ms linear infinite;
+}
+
+@keyframes transition-spinner {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 @keyframes window-cover-in {
@@ -420,6 +461,7 @@ button:active {
 @media (prefers-reduced-motion: reduce) {
   .window-transition-cover,
   .window-transition-cover.reveal,
+  .window-transition-spinner,
   .toast,
   .toast-progress {
     animation-duration: 1ms;
@@ -1859,6 +1901,86 @@ kbd {
   font-size: 0.84rem;
 }
 
+.backup-panel-head {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface-strong);
+}
+
+.admin-safety-strip {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface-strong);
+  color: var(--ink);
+}
+
+.admin-safety-strip div {
+  display: grid;
+  gap: 3px;
+}
+
+.admin-safety-strip span {
+  color: var(--muted);
+  font-weight: 750;
+}
+
+.backup-panel-head h3,
+.backup-panel-head p {
+  margin: 0;
+}
+
+.backup-panel-head p {
+  color: var(--muted);
+  font-weight: 750;
+}
+
+.backup-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: white;
+}
+
+.backup-row > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.backup-row span,
+.restore-summary span,
+.restore-summary small {
+  color: var(--muted);
+  font-weight: 750;
+}
+
+.restore-modal {
+  max-width: 460px;
+}
+
+.restore-summary {
+  display: grid;
+  gap: 6px;
+  padding: 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
 .row-action,
 .danger-button.mini {
   min-height: 32px;
@@ -3239,6 +3361,27 @@ kbd {
   color: var(--ink);
   padding: 0 12px;
   font-weight: 800;
+}
+
+.muted-copy {
+  color: var(--muted);
+  font-weight: 750;
+}
+
+.denomination-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.denomination-grid label {
+  gap: 4px;
+}
+
+.denomination-grid input {
+  min-width: 0;
+  min-height: 40px;
+  padding: 0 10px;
 }
 
 .delete-ticket-summary {
