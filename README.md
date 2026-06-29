@@ -1,6 +1,6 @@
 # RIM-POS
 
-Punto de venta local para tiendas de abarrotes. Inspirado en el flujo rapido de eleventa, con diseno propio, alta legibilidad y operacion por teclado.
+Punto de venta local para tiendas de abarrotes. Tiene un flujo rapido, con diseño propio, alta legibilidad y operacion por teclado.
 
 ## Stack
 
