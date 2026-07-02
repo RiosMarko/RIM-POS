@@ -12,20 +12,22 @@ export function roundMoney(value: number): number {
 export function cartTotals(
   lines: Array<{ product: { price: number; tax_rate: number }; quantity: number; discount: number }>,
   pricesIncludeTax = true,
+  taxEnabled = true,
 ) {
   let subtotal = 0;
   let tax = 0;
   lines.forEach((line) => {
     const base = line.product.price * line.quantity;
     const taxable = Math.max(0, base - line.discount);
-    if (pricesIncludeTax && line.product.tax_rate > 0) {
-      const net = taxable / (1 + line.product.tax_rate);
+    const taxRate = taxEnabled ? line.product.tax_rate : 0;
+    if (pricesIncludeTax && taxRate > 0) {
+      const net = taxable / (1 + taxRate);
       subtotal += net;
       tax += taxable - net;
       return;
     }
     subtotal += taxable;
-    tax += taxable * line.product.tax_rate;
+    tax += taxable * taxRate;
   });
   const discount = lines.reduce((sum, line) => sum + line.discount, 0);
   const total = roundMoney(subtotal + tax);

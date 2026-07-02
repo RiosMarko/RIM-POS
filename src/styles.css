@@ -1413,6 +1413,130 @@ kbd {
   box-shadow: var(--shadow-soft);
 }
 
+.import-review {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: white;
+  box-shadow: var(--shadow-soft);
+}
+
+.import-review-error {
+  border-color: oklch(0.78 0.11 62);
+  background: var(--warning-bg);
+}
+
+.import-review-header,
+.import-review-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.import-review-header h3,
+.import-review-header p {
+  margin: 0;
+}
+
+.import-review-header p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-weight: 750;
+}
+
+.import-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 0 10px;
+  border-radius: var(--radius);
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.import-status.success {
+  background: var(--success-bg);
+  color: var(--success-ink);
+}
+
+.import-status.warning {
+  background: var(--warning-bg);
+  color: var(--warning-ink);
+}
+
+.import-issues {
+  display: grid;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.import-issue-row {
+  display: grid;
+  grid-template-columns: 86px 180px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  min-height: 38px;
+  padding: 0 10px;
+  border-top: 1px solid var(--line);
+  background: white;
+}
+
+.import-issue-row:first-child {
+  border-top: 0;
+}
+
+.import-issue-row span,
+.import-issue-row em {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-issue-row em {
+  color: var(--danger);
+  font-style: normal;
+  font-weight: 850;
+}
+
+.import-issue-row.muted em {
+  color: var(--muted);
+}
+
+.import-preview-grid {
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.import-preview-grid div {
+  display: grid;
+  gap: 4px;
+  min-height: 58px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-soft);
+}
+
+.import-preview-grid span {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 850;
+}
+
+.import-preview-grid strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .product-row,
 .catalog-row,
 .inventory-row {

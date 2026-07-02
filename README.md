@@ -43,6 +43,19 @@ MVP inicial:
 - Cajera: `Cajera` / `1111`
 
 En builds de produccion, el primer arranque debe crear un administrador inicial.
+El catalogo inicial en produccion queda vacio: importa CSV real o captura productos antes de probar venta en tienda.
+
+## Build local
+
+```bash
+npm run tauri:build
+```
+
+En macOS local genera `.app` para evitar fallas de `hdiutil`/DMG de entorno. Para instaladores completos usa:
+
+```bash
+npm run tauri:build:installers
+```
 
 ## Teclas rapidas
 

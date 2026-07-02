@@ -16,7 +16,7 @@ import { ErrorBoundary } from "./components/error/ErrorBoundary";
 import { AppShell } from "./components/layout/AppShell";
 import { ConfirmActionModal, NumberPromptModal, type ConfirmDraft, type NumberPromptDraft } from "./components/modals/CommonModals";
 import { WindowTitlebar, WindowTransitionCover } from "./components/window/WindowChrome";
-import { AdminView } from "./features/admin/AdminView";
+import { AdminView, preloadAdminViews } from "./features/admin/AdminView";
 import { AdminGate, LoginScreen } from "./features/auth/AuthScreens";
 import { ExpenseDialog } from "./features/cash/CashModals";
 import {
@@ -37,8 +37,9 @@ import {
   createSale,
   createAutoBackupIfDue,
   deleteHeldTicket,
+  getAppBootstrap,
   getDashboardSummary,
-  getSetting,
+  getProductsByIds,
   listHeldTickets,
   login,
   openCashSession,
@@ -79,6 +80,19 @@ const navItems: Array<NavItem<typeof ShoppingCart>> = [
 
 const ACTIVE_DRAFT_SAVE_DELAY_MS = 3000;
 
+function runWhenIdle(action: () => void) {
+  const idleWindow = window as Window & {
+    requestIdleCallback?: (callback: () => void) => number;
+    cancelIdleCallback?: (handle: number) => void;
+  };
+  if (idleWindow.requestIdleCallback) {
+    const handle = idleWindow.requestIdleCallback(action);
+    return () => idleWindow.cancelIdleCallback?.(handle);
+  }
+  const handle = window.setTimeout(action, 500);
+  return () => window.clearTimeout(handle);
+}
+
 function App() {
   const [session, setSession] = useState<UserSession | null>(null);
   const [setupRequired, setSetupRequired] = useState(false);
@@ -106,11 +120,13 @@ function App() {
   const [confirmDraft, setConfirmDraft] = useState<ConfirmDraft | null>(null);
   const [numberPromptDraft, setNumberPromptDraft] = useState<NumberPromptDraft | null>(null);
   const [selectedCartProductId, setSelectedCartProductId] = useState<number | null>(null);
+  const [taxEnabled, setTaxEnabled] = useState(true);
   const [pricesIncludeTax, setPricesIncludeTax] = useState(true);
   const searchRef = useRef<HTMLInputElement>(null);
   const cashRef = useRef<HTMLInputElement>(null);
   const recoveryCheckedSessionRef = useRef<number | null>(null);
   const lastSavedActiveDraftRef = useRef("");
+  const productSearchRequestRef = useRef(0);
 
   const isAdmin = session?.role === "admin";
   const {
@@ -122,7 +138,7 @@ function App() {
     grantPendingAdminView,
     resetNavigation,
   } = useAdminNavigation({ session, isAdmin, navItems });
-  const totals = useMemo(() => cartTotals(cart, true), [cart]);
+  const totals = useMemo(() => cartTotals(cart, pricesIncludeTax, taxEnabled), [cart, pricesIncludeTax, taxEnabled]);
   const cashPaid = Number(cashReceived) || 0;
   const cardPaid = Number(cardReceived) || 0;
   const transferPaid = Number(transferReceived) || 0;
@@ -155,7 +171,10 @@ function App() {
 
   const refreshProducts = useCallback(
     async (nextQuery = query) => {
+      const requestId = productSearchRequestRef.current + 1;
+      productSearchRequestRef.current = requestId;
       const result = await searchProducts(nextQuery);
+      if (requestId !== productSearchRequestRef.current) return;
       setProducts(result);
     },
     [query],
@@ -183,22 +202,29 @@ function App() {
       window.localStorage.removeItem("rim-pos-post-restore-message");
       window.setTimeout(() => showToast(restoreMessage), 250);
     }
-    if (!autoBackupCheckedRef.current) {
-      autoBackupCheckedRef.current = true;
-      createAutoBackupIfDue()
-        .then((result) => {
-          if (result) showToast("Backup automatico creado");
-        })
-        .catch((error) => showToast(`Backup automatico fallo: ${String(error)}`));
-    }
-    refreshSummary().catch((error) => showToast(String(error)));
-    refreshProducts("").catch((error) => showToast(String(error)));
-    refreshHeldTickets().catch((error) => showToast(String(error)));
-    getSetting("tax_prices_include_tax")
-      .then(() => setPricesIncludeTax(true))
+    getAppBootstrap()
+      .then((bootstrap) => {
+        setSummary(bootstrap.summary);
+        setProducts(bootstrap.products);
+        setHeldTickets(bootstrap.held_tickets);
+        setTaxEnabled(bootstrap.tax_enabled);
+        setPricesIncludeTax(bootstrap.tax_prices_include_tax);
+      })
       .catch((error) => showToast(String(error)));
+    const cancelIdle = runWhenIdle(() => {
+      preloadAdminViews();
+      if (!autoBackupCheckedRef.current) {
+        autoBackupCheckedRef.current = true;
+        createAutoBackupIfDue()
+          .then((result) => {
+            if (result) showToast("Backup automatico creado");
+          })
+          .catch((error) => showToast(`Backup automatico fallo: ${String(error)}`));
+      }
+    });
     window.setTimeout(() => searchRef.current?.focus(), 50);
-  }, [refreshHeldTickets, refreshProducts, refreshSummary, session, showToast]);
+    return cancelIdle;
+  }, [session, showToast]);
 
   useEffect(() => {
     if (!session || !summary) return;
@@ -251,7 +277,10 @@ function App() {
 
   const submitSearch = async (event?: FormEvent) => {
     event?.preventDefault();
+    const requestId = productSearchRequestRef.current + 1;
+    productSearchRequestRef.current = requestId;
     const result = await searchProducts(query);
+    if (requestId !== productSearchRequestRef.current) return;
     setProducts(result);
     if (query.trim() && result.length === 1) addProduct(result[0]);
   };
@@ -300,10 +329,21 @@ function App() {
         await refreshHeldTickets();
       }
       await clearActiveDraftForSession();
-      if (options.printTicket !== false) await printTicket(receipt.sale_id);
-      await openDrawer();
+      const hardwareWarnings: string[] = [];
+      if (options.printTicket !== false) {
+        try {
+          await printTicket(receipt.sale_id);
+        } catch (error) {
+          hardwareWarnings.push(`Ticket no impreso: ${String(error)}`);
+        }
+      }
+      try {
+        await openDrawer();
+      } catch (error) {
+        hardwareWarnings.push(`Cajon no abrio: ${String(error)}`);
+      }
       await refreshSummary();
-      showToast(`Venta ${receipt.folio} cobrada`);
+      showToast(hardwareWarnings.length ? `Venta ${receipt.folio} cobrada. ${hardwareWarnings.join(" ")}` : `Venta ${receipt.folio} cobrada`);
       searchRef.current?.focus();
     } catch (error) {
       showToast(String(error));
@@ -513,10 +553,10 @@ function App() {
     }
     try {
       await persistActiveHeldTicket();
-      const catalog = await searchProducts("");
-      setProducts(catalog);
+      const catalog = await getProductsByIds(ticket.items.map((item) => item.product_id));
+      const byId = new Map(catalog.map((product) => [product.id, product]));
       const nextCart = ticket.items.map((item) => {
-        const product = catalog.find((candidate) => candidate.id === item.product_id);
+        const product = byId.get(item.product_id);
         if (!product) {
           throw new Error(`Producto no disponible: ${item.product_id}`);
         }
@@ -540,10 +580,10 @@ function App() {
   const recoverActiveSaleDraft = async () => {
     if (!recoveryDraft) return;
     try {
-      const catalog = await searchProducts("");
-      setProducts(catalog);
+      const catalog = await getProductsByIds(recoveryDraft.items.map((item) => item.product_id));
+      const byId = new Map(catalog.map((product) => [product.id, product]));
       const nextCart = recoveryDraft.items.map((item) => {
-        const product = catalog.find((candidate) => candidate.id === item.product_id);
+        const product = byId.get(item.product_id);
         if (!product) {
           throw new Error(`Producto no disponible: ${item.product_id}`);
         }
@@ -740,7 +780,10 @@ function App() {
               refreshProducts={refreshProducts}
               refreshSummary={refreshSummary}
               showToast={showToast}
-              onTaxModeChange={setPricesIncludeTax}
+              onTaxModeChange={({ enabled, pricesIncludeTax: nextPricesIncludeTax }) => {
+                setTaxEnabled(enabled);
+                setPricesIncludeTax(nextPricesIncludeTax);
+              }}
               requestConfirm={setConfirmDraft}
             />
           )}

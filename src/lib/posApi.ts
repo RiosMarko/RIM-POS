@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   ActiveSaleDraft,
+  AppBootstrap,
   AuditLogEntry,
   BackupFile,
   BackupRestoreResult,
@@ -20,6 +21,8 @@ import type {
   MonthlySalesReport,
   Payment,
   Product,
+  ProductImportRow,
+  ProductImportResult,
   ProductInput,
   ProductSalesReport,
   ReportMovement,
@@ -231,7 +234,11 @@ function taxRateFromIds(taxIds: number[]) {
 }
 
 function isTauri() {
-  return typeof window !== "undefined" && Boolean(window.__TAURI_INTERNALS__);
+  const hasTauriRuntime = typeof window !== "undefined" && Boolean(window.__TAURI_INTERNALS__);
+  if (!hasTauriRuntime && !import.meta.env.DEV && import.meta.env.MODE !== "test") {
+    throw new Error("Runtime Tauri requerido: mock navegador desactivado en produccion");
+  }
+  return hasTauriRuntime;
 }
 
 function mockBoolSetting(key: string, defaultValue: boolean) {
@@ -241,7 +248,7 @@ function mockBoolSetting(key: string, defaultValue: boolean) {
 function lineAmounts(base: number, discount: number, taxRate: number) {
   const taxable = Math.max(0, base - discount);
   const taxEnabled = mockBoolSetting("tax_enabled", true);
-  const pricesIncludeTax = true;
+  const pricesIncludeTax = mockBoolSetting("tax_prices_include_tax", true);
   if (!taxEnabled || taxRate <= 0) return { subtotal: taxable, tax: 0, total: taxable };
   if (pricesIncludeTax) {
     const subtotal = taxable / (1 + taxRate);
@@ -272,6 +279,15 @@ export async function searchProducts(query: string): Promise<Product[]> {
   );
 }
 
+export async function getProductsByIds(ids: number[]): Promise<Product[]> {
+  const uniqueIds = Array.from(new Set(ids.filter((id) => Number.isFinite(id) && id > 0)));
+  if (uniqueIds.length === 0) return [];
+  if (isTauri()) {
+    return call<Product[]>("product_get_many", { actorId: requireActorId(), ids: uniqueIds });
+  }
+  return demoProducts.filter((product) => uniqueIds.includes(product.id));
+}
+
 export async function upsertProduct(input: ProductInput): Promise<Product> {
   if (isTauri()) {
     return call<Product>("product_upsert", { actorId: requireActorId(), input });
@@ -282,6 +298,57 @@ export async function upsertProduct(input: ProductInput): Promise<Product> {
   const product: Product = { ...input, tax_ids, tax_rate, id: nowId };
   demoProducts = [product, ...demoProducts.filter((current) => current.id !== nowId)];
   return product;
+}
+
+export async function bulkImportProducts(rows: ProductImportRow[]): Promise<ProductImportResult> {
+  if (isTauri()) {
+    return call<ProductImportResult>("product_bulk_import", { actorId: requireActorId(), rows });
+  }
+  const issues: ProductImportResult["issues"] = [];
+  const seenSkus = new Set<string>();
+  const seenBarcodes = new Set<string>();
+  const prepared = rows.map((row) => {
+    const sku = row.sku.trim().toUpperCase();
+    const barcode = row.barcode.trim();
+    const name = row.name.trim();
+    const category = row.category.trim();
+    const unit = row.unit.trim();
+    const issue = (message: string) => {
+      issues.push({ row_number: row.row_number, sku, barcode, message });
+    };
+    if (sku.length < 2) issue("SKU requerido");
+    if (barcode.length < 2) issue("Codigo requerido");
+    if (name.length < 2) issue("Nombre requerido");
+    if (category.length < 2) issue("Departamento requerido");
+    if (unit.length < 1) issue("Unidad requerida");
+    if ([row.price, row.cost, row.stock, row.min_stock, row.tax_rate].some((value) => !Number.isFinite(value) || value < 0)) {
+      issue("Importe o existencia invalida");
+    }
+    const skuKey = sku.toLowerCase();
+    if (seenSkus.has(skuKey)) issue("SKU duplicado en archivo");
+    seenSkus.add(skuKey);
+    if (seenBarcodes.has(barcode)) issue("Codigo duplicado en archivo");
+    seenBarcodes.add(barcode);
+    return { ...row, sku, barcode, name, category, unit };
+  });
+  if (issues.length) {
+    return { imported: 0, created: 0, updated: 0, failed: issues.length, committed: false, issues };
+  }
+  let created = 0;
+  let updated = 0;
+  prepared.forEach((row) => {
+    const existing = demoProducts.find(
+      (product) => product.sku.toLowerCase() === row.sku.toLowerCase() || product.barcode === row.barcode,
+    );
+    const id = existing?.id ?? Math.max(0, ...demoProducts.map((product) => product.id)) + 1;
+    if (existing) updated += 1;
+    else created += 1;
+    const tax_ids = row.tax_ids ?? [];
+    const tax_rate = tax_ids.length ? taxRateFromIds(tax_ids) : row.tax_rate;
+    const product: Product = { ...row, id, tax_ids, tax_rate };
+    demoProducts = [product, ...demoProducts.filter((current) => current.id !== id)];
+  });
+  return { imported: created + updated, created, updated, failed: 0, committed: true, issues: [] };
 }
 
 export async function deleteProduct(id: number): Promise<void> {
@@ -1044,6 +1111,19 @@ export async function getDashboardSummary(): Promise<DashboardSummary> {
     today_sales: mockCashSession?.sales_total ?? 0,
     today_tickets: mockSaleId - 1,
     open_cash_session: mockCashSession?.status === "open" ? mockCashSession : null,
+  };
+}
+
+export async function getAppBootstrap(): Promise<AppBootstrap> {
+  if (isTauri()) {
+    return call<AppBootstrap>("app_bootstrap", { actorId: requireActorId() });
+  }
+  return {
+    summary: await getDashboardSummary(),
+    products: await searchProducts(""),
+    held_tickets: await listHeldTickets(),
+    tax_enabled: mockBoolSetting("tax_enabled", true),
+    tax_prices_include_tax: mockBoolSetting("tax_prices_include_tax", true),
   };
 }
 

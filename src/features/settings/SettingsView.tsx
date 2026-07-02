@@ -9,10 +9,11 @@ export function SettingsView({
   onTaxModeChange,
 }: {
   showToast: (message: string) => void;
-  onTaxModeChange: (enabled: boolean) => void;
+  onTaxModeChange: (mode: { enabled: boolean; pricesIncludeTax: boolean }) => void;
 }) {
   const [printer, setPrinter] = useState("mock-printer-80mm");
   const [scale, setScale] = useState("mock-scale-serial");
+  const [scaleBaudRate, setScaleBaudRate] = useState(9600);
   const [drawer, setDrawer] = useState("mock-drawer-escpos");
   const [workstationId, setWorkstationId] = useState("CAJA-1");
   const [taxEnabled, setTaxEnabled] = useState(true);
@@ -64,6 +65,7 @@ export function SettingsView({
       getSetting("printer"),
       getSetting("workstation_id"),
       getSetting("scale"),
+      getSetting("scale_baud_rate"),
       getSetting("drawer"),
       getSetting("tax_enabled"),
       getSetting("tax_country"),
@@ -89,6 +91,7 @@ export function SettingsView({
         nextPrinter,
         nextWorkstationId,
         nextScale,
+        nextScaleBaudRate,
         nextDrawer,
         nextTaxEnabled,
         nextTaxCountry,
@@ -116,11 +119,13 @@ export function SettingsView({
         setPrinter(nextPrinter || defaultPrinter?.id || "mock-printer-80mm");
         setWorkstationId(nextWorkstationId || "CAJA-1");
         setScale(nextScale || defaultSerial?.id || "mock-scale-serial");
+        setScaleBaudRate(Number(nextScaleBaudRate ?? 9600));
         setDrawer(nextDrawer || defaultPrinter?.id || defaultSerial?.id || "mock-drawer-escpos");
-        setTaxEnabled(nextTaxEnabled !== "false");
+        const enabled = nextTaxEnabled !== "false";
+        setTaxEnabled(enabled);
         setTaxCountry(nextTaxCountry || "MX");
         setTaxDefaultRate(Number(nextTaxDefaultRate ?? 0.16));
-        setTaxPricesIncludeTax(true);
+        setTaxPricesIncludeTax(nextTaxPricesIncludeTax !== "false");
         setTaxShowBreakdown(nextTaxShowBreakdown !== "false");
         setTaxAutoApply(nextTaxAutoApply !== "false");
         setTicketStoreName(nextTicketStoreName || "RIM-POS");
@@ -135,7 +140,7 @@ export function SettingsView({
         setTicketStartLines(Number(nextTicketStartLines ?? 0));
         setTicketExtraLines(Number(nextTicketExtraLines ?? 3));
         setTicketCopies(Number(nextTicketCopies ?? 1));
-        onTaxModeChange(true);
+        onTaxModeChange({ enabled, pricesIncludeTax: nextTaxPricesIncludeTax !== "false" });
       })
       .catch((error) => showToast(String(error)));
   }, [onTaxModeChange, showToast]);
@@ -185,11 +190,12 @@ export function SettingsView({
       await setSetting("printer", printer);
       await setSetting("workstation_id", workstationId.trim() || "CAJA-1");
       await setSetting("scale", scale);
+      await setSetting("scale_baud_rate", String(scaleBaudRate));
       await setSetting("drawer", drawer);
       await setSetting("tax_enabled", String(taxEnabled));
       await setSetting("tax_country", taxCountry);
       await setSetting("tax_default_rate", String(taxDefaultRate));
-      await setSetting("tax_prices_include_tax", "true");
+      await setSetting("tax_prices_include_tax", String(taxPricesIncludeTax));
       await setSetting("tax_show_breakdown", String(taxShowBreakdown));
       await setSetting("tax_auto_apply_new_products", String(taxAutoApply));
       await setSetting("ticket_store_name", ticketStoreName);
@@ -211,7 +217,7 @@ export function SettingsView({
         setTicketExtraLines(previewSettings.extraLines);
         setTicketPreviewDirty(false);
       }
-      onTaxModeChange(true);
+      onTaxModeChange({ enabled: taxEnabled, pricesIncludeTax: taxPricesIncludeTax });
       showToast("Configuracion guardada");
     } catch (error) {
       showToast(String(error));
@@ -404,6 +410,13 @@ export function SettingsView({
                   <option value="false">Asignar manualmente</option>
                 </select>
               </label>
+              <label>
+                Precios
+                <select value={taxPricesIncludeTax ? "included" : "added"} onChange={(event) => setTaxPricesIncludeTax(event.target.value === "included")} disabled={!taxEnabled}>
+                  <option value="included">Precio ya incluye impuestos</option>
+                  <option value="added">Sumar impuestos al cobrar</option>
+                </select>
+              </label>
             </div>
           </section>
 
@@ -435,6 +448,16 @@ export function SettingsView({
                   {serialDevices.map((device) => (
                     <option value={device.id} key={device.id}>{deviceLabel(device)}</option>
                   ))}
+                </select>
+              </label>
+              <label>
+                Baud bascula
+                <select value={scaleBaudRate} onChange={(event) => setScaleBaudRate(Number(event.target.value))}>
+                  <option value={2400}>2400</option>
+                  <option value={4800}>4800</option>
+                  <option value={9600}>9600</option>
+                  <option value={19200}>19200</option>
+                  <option value={38400}>38400</option>
                 </select>
               </label>
               <label>

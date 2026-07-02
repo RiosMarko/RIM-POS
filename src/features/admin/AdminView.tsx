@@ -1,16 +1,31 @@
 import type { ConfirmDraft } from "../../components/modals/CommonModals";
-import { AdministrationView } from "./AdministrationView";
-import { CashView } from "../cash/CashView";
-import { CustomersView } from "../customers/CustomersView";
-import { InventoryView } from "../inventory/InventoryView";
-import { InvoicesView } from "../invoices/InvoicesView";
-import { ProductsView } from "../products/ProductsView";
-import { PurchasesView } from "../purchases/PurchasesView";
-import { ReportsView } from "../reports/ReportsView";
-import { SettingsView } from "../settings/SettingsView";
-import { UsersView } from "../users/UsersView";
+import { lazy, Suspense } from "react";
 import type { ViewKey } from "../../navigation";
 import type { DashboardSummary, Product, UserSession } from "../../types";
+
+const AdministrationView = lazy(() => import("./AdministrationView").then((module) => ({ default: module.AdministrationView })));
+const CashView = lazy(() => import("../cash/CashView").then((module) => ({ default: module.CashView })));
+const CustomersView = lazy(() => import("../customers/CustomersView").then((module) => ({ default: module.CustomersView })));
+const InventoryView = lazy(() => import("../inventory/InventoryView").then((module) => ({ default: module.InventoryView })));
+const InvoicesView = lazy(() => import("../invoices/InvoicesView").then((module) => ({ default: module.InvoicesView })));
+const ProductsView = lazy(() => import("../products/ProductsView").then((module) => ({ default: module.ProductsView })));
+const PurchasesView = lazy(() => import("../purchases/PurchasesView").then((module) => ({ default: module.PurchasesView })));
+const ReportsView = lazy(() => import("../reports/ReportsView").then((module) => ({ default: module.ReportsView })));
+const SettingsView = lazy(() => import("../settings/SettingsView").then((module) => ({ default: module.SettingsView })));
+const UsersView = lazy(() => import("../users/UsersView").then((module) => ({ default: module.UsersView })));
+
+export function preloadAdminViews() {
+  void import("./AdministrationView");
+  void import("../cash/CashView");
+  void import("../customers/CustomersView");
+  void import("../inventory/InventoryView");
+  void import("../invoices/InvoicesView");
+  void import("../products/ProductsView");
+  void import("../purchases/PurchasesView");
+  void import("../reports/ReportsView");
+  void import("../settings/SettingsView");
+  void import("../users/UsersView");
+}
 
 export function AdminView({
   view,
@@ -32,17 +47,18 @@ export function AdminView({
   refreshProducts: (query?: string) => Promise<void>;
   refreshSummary: () => Promise<void>;
   showToast: (message: string) => void;
-  onTaxModeChange: (enabled: boolean) => void;
+  onTaxModeChange: (mode: { enabled: boolean; pricesIncludeTax: boolean }) => void;
   requestConfirm: (draft: ConfirmDraft) => void;
 }) {
-  if (view === "users") return <UsersView showToast={showToast} requestConfirm={requestConfirm} />;
+  let content;
+  if (view === "users") content = <UsersView showToast={showToast} requestConfirm={requestConfirm} />;
 
-  if (view === "products") return <ProductsView products={products} refreshProducts={refreshProducts} showToast={showToast} requestConfirm={requestConfirm} />;
-  if (view === "inventory") return <InventoryView products={products} refreshProducts={refreshProducts} showToast={showToast} />;
+  else if (view === "products") content = <ProductsView products={products} refreshProducts={refreshProducts} showToast={showToast} requestConfirm={requestConfirm} />;
+  else if (view === "inventory") content = <InventoryView products={products} refreshProducts={refreshProducts} showToast={showToast} />;
 
-  if (view === "cash") {
+  else if (view === "cash") {
     const cashSession = summary?.open_cash_session;
-    return (
+    content = (
       <CashView
         session={session}
         cashSession={cashSession ?? null}
@@ -55,10 +71,10 @@ export function AdminView({
     );
   }
 
-  if (view === "reports") return <ReportsView showToast={showToast} />;
+  else if (view === "reports") content = <ReportsView showToast={showToast} />;
 
-  if (view === "purchases") {
-    return (
+  else if (view === "purchases") {
+    content = (
       <PurchasesView
         session={session}
         products={products}
@@ -68,10 +84,11 @@ export function AdminView({
     );
   }
 
-  if (view === "invoices") return <InvoicesView showToast={showToast} />;
+  else if (view === "invoices") content = <InvoicesView showToast={showToast} />;
 
-  if (view === "settings") return <SettingsView showToast={showToast} onTaxModeChange={onTaxModeChange} />;
-  if (view === "administration") return <AdministrationView showToast={showToast} />;
+  else if (view === "settings") content = <SettingsView showToast={showToast} onTaxModeChange={onTaxModeChange} />;
+  else if (view === "administration") content = <AdministrationView showToast={showToast} />;
+  else content = <CustomersView showToast={showToast} />;
 
-  return <CustomersView showToast={showToast} />;
+  return <Suspense fallback={null}>{content}</Suspense>;
 }

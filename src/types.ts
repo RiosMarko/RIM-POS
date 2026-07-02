@@ -19,6 +19,26 @@ export type Product = {
 
 export type ProductInput = Omit<Product, "id"> & { id?: number };
 
+export type ProductImportRow = Omit<ProductInput, "id"> & {
+  row_number: number;
+};
+
+export type ProductImportIssue = {
+  row_number: number;
+  sku: string;
+  barcode: string;
+  message: string;
+};
+
+export type ProductImportResult = {
+  imported: number;
+  created: number;
+  updated: number;
+  failed: number;
+  committed: boolean;
+  issues: ProductImportIssue[];
+};
+
 export type CartLine = {
   product: Product;
   quantity: number;
@@ -173,6 +193,14 @@ export type DashboardSummary = {
   today_sales: number;
   today_tickets: number;
   open_cash_session?: CashSession | null;
+};
+
+export type AppBootstrap = {
+  summary: DashboardSummary;
+  products: Product[];
+  held_tickets: HeldTicket[];
+  tax_enabled: boolean;
+  tax_prices_include_tax: boolean;
 };
 
 export type InventoryMovement = {

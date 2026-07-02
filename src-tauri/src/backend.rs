@@ -4,6 +4,10 @@ use crate::core::{
     average_ticket, next_monthly_seq, now_iso, period_key, round_money, should_run_auto_backup,
     visible_monthly_folio,
 };
+use crate::hardware::{
+    device_list, read_serial_scale, run_print_file, temp_hardware_file, write_raw_device,
+    HardwareDevice,
+};
 #[cfg(test)]
 use crate::security::legacy_hash_pin;
 use crate::security::{hash_pin, verify_pin};
@@ -14,15 +18,13 @@ use crate::validation::{
     validate_non_negative, validate_optional_email, validate_optional_rfc, validate_pin,
     validate_positive, validate_required_text,
 };
-use chrono::Utc;
-use rusqlite::{params, types::Type, Connection, OpenFlags, OptionalExtension};
+use chrono::{Duration, Utc};
+use rusqlite::{params, params_from_iter, types::Type, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::env;
 use std::fs;
-use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, State};
 
@@ -68,6 +70,42 @@ struct ProductInput {
     #[serde(default)]
     tax_ids: Vec<i64>,
     active: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProductImportRow {
+    row_number: i64,
+    sku: String,
+    barcode: String,
+    name: String,
+    category: String,
+    unit: String,
+    price: f64,
+    cost: f64,
+    stock: f64,
+    min_stock: f64,
+    tax_rate: f64,
+    #[serde(default)]
+    tax_ids: Vec<i64>,
+    active: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ProductImportIssue {
+    row_number: i64,
+    sku: String,
+    barcode: String,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ProductImportResult {
+    imported: i64,
+    created: i64,
+    updated: i64,
+    failed: i64,
+    committed: bool,
+    issues: Vec<ProductImportIssue>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -321,16 +359,6 @@ struct HardwareResult {
 }
 
 #[derive(Debug, Serialize)]
-struct HardwareDevice {
-    id: String,
-    name: String,
-    device_type: String,
-    connection: String,
-    detail: String,
-    is_default: bool,
-}
-
-#[derive(Debug, Serialize)]
 struct ScaleReading {
     ok: bool,
     weight: f64,
@@ -345,6 +373,15 @@ struct DashboardSummary {
     today_sales: f64,
     today_tickets: i64,
     open_cash_session: Option<CashSession>,
+}
+
+#[derive(Debug, Serialize)]
+struct AppBootstrap {
+    summary: DashboardSummary,
+    products: Vec<Product>,
+    held_tickets: Vec<HeldTicket>,
+    tax_enabled: bool,
+    tax_prices_include_tax: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -683,6 +720,231 @@ fn save_product_taxes(conn: &Connection, product_id: i64, tax_ids: &[i64]) -> Co
         }
     }
     Ok(())
+}
+
+fn product_import_issue(row: &ProductImportRow, message: impl Into<String>) -> ProductImportIssue {
+    ProductImportIssue {
+        row_number: row.row_number,
+        sku: row.sku.trim().to_string(),
+        barcode: row.barcode.trim().to_string(),
+        message: message.into(),
+    }
+}
+
+fn existing_product_id_for_import(
+    conn: &Connection,
+    sku: &str,
+    barcode: &str,
+) -> CommandResult<Option<i64>> {
+    let sku_id = conn
+        .query_row(
+            "SELECT id FROM products WHERE lower(sku) = lower(?1)",
+            params![sku],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let barcode_id = conn
+        .query_row(
+            "SELECT id FROM products WHERE barcode = ?1",
+            params![barcode],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    match (sku_id, barcode_id) {
+        (Some(left), Some(right)) if left != right => {
+            Err("SKU y codigo pertenecen a productos distintos".to_string())
+        }
+        (Some(id), _) | (_, Some(id)) => Ok(Some(id)),
+        (None, None) => Ok(None),
+    }
+}
+
+fn import_products_with_conn(
+    conn: &mut Connection,
+    rows: Vec<ProductImportRow>,
+) -> CommandResult<ProductImportResult> {
+    if rows.is_empty() {
+        return Ok(ProductImportResult {
+            imported: 0,
+            created: 0,
+            updated: 0,
+            failed: 1,
+            committed: false,
+            issues: vec![ProductImportIssue {
+                row_number: 0,
+                sku: String::new(),
+                barcode: String::new(),
+                message: "CSV sin productos".into(),
+            }],
+        });
+    }
+
+    let mut issues = Vec::new();
+    let mut seen_skus = HashSet::new();
+    let mut seen_barcodes = HashSet::new();
+    let mut prepared = Vec::new();
+
+    for row in rows {
+        let sku = row.sku.trim();
+        let barcode = row.barcode.trim();
+        let name = row.name.trim();
+        let category = row.category.trim();
+        let unit = row.unit.trim();
+
+        if let Err(message) = validate_required_text(sku, 2, "SKU requerido") {
+            issues.push(product_import_issue(&row, message));
+            continue;
+        }
+        if let Err(message) = validate_required_text(barcode, 2, "Codigo requerido") {
+            issues.push(product_import_issue(&row, message));
+            continue;
+        }
+        if let Err(message) = validate_required_text(name, 2, "Nombre requerido") {
+            issues.push(product_import_issue(&row, message));
+            continue;
+        }
+        if let Err(message) = validate_required_text(category, 2, "Departamento requerido") {
+            issues.push(product_import_issue(&row, message));
+            continue;
+        }
+        if let Err(message) = validate_required_text(unit, 1, "Unidad requerida") {
+            issues.push(product_import_issue(&row, message));
+            continue;
+        }
+        let mut numeric_error = None;
+        for (value, label) in [
+            (row.price, "Precio invalido"),
+            (row.cost, "Costo invalido"),
+            (row.stock, "Stock invalido"),
+            (row.min_stock, "Minimo invalido"),
+            (row.tax_rate, "Impuesto invalido"),
+        ] {
+            if let Err(message) = validate_non_negative(value, label) {
+                numeric_error = Some(message);
+                break;
+            }
+        }
+        if let Some(message) = numeric_error {
+            issues.push(product_import_issue(&row, message));
+            continue;
+        }
+
+        let normalized_sku = sku.to_ascii_lowercase();
+        if !seen_skus.insert(normalized_sku) {
+            issues.push(product_import_issue(&row, "SKU duplicado en archivo"));
+            continue;
+        }
+        if !seen_barcodes.insert(barcode.to_string()) {
+            issues.push(product_import_issue(&row, "Codigo duplicado en archivo"));
+            continue;
+        }
+
+        match existing_product_id_for_import(conn, sku, barcode) {
+            Ok(id) => prepared.push(ProductInput {
+                id,
+                sku: sku.to_string(),
+                barcode: barcode.to_string(),
+                name: name.to_string(),
+                category: category.to_string(),
+                unit: unit.to_string(),
+                price: row.price,
+                cost: row.cost,
+                stock: row.stock,
+                min_stock: row.min_stock,
+                tax_rate: row.tax_rate,
+                tax_ids: row.tax_ids,
+                active: row.active,
+            }),
+            Err(message) => issues.push(product_import_issue(&row, message)),
+        }
+    }
+
+    if !issues.is_empty() {
+        return Ok(ProductImportResult {
+            imported: 0,
+            created: 0,
+            updated: 0,
+            failed: issues.len() as i64,
+            committed: false,
+            issues,
+        });
+    }
+
+    let tx = conn.transaction().map_err(|error| error.to_string())?;
+    let now = now_iso();
+    let mut created = 0_i64;
+    let mut updated = 0_i64;
+    for input in prepared {
+        let active = if input.active { 1 } else { 0 };
+        let tax_rate = tax_rate_for_ids(&tx, &input.tax_ids, input.tax_rate)?;
+        let id = match input.id {
+            Some(id) => {
+                tx.execute(
+                    "UPDATE products
+                     SET sku = ?1, barcode = ?2, name = ?3, category = ?4, unit = ?5, price = ?6,
+                         cost = ?7, stock = ?8, min_stock = ?9, tax_rate = ?10, active = ?11, search_text = ?12, updated_at = ?13
+                     WHERE id = ?14",
+                    params![
+                        input.sku,
+                        input.barcode,
+                        input.name,
+                        input.category,
+                        input.unit,
+                        input.price,
+                        input.cost,
+                        input.stock,
+                        input.min_stock,
+                        tax_rate,
+                        active,
+                        product_search_text(&input.sku, &input.barcode, &input.name, &input.category, &input.unit),
+                        now,
+                        id
+                    ],
+                )
+                .map_err(|error| error.to_string())?;
+                updated += 1;
+                id
+            }
+            None => {
+                tx.execute(
+                    "INSERT INTO products
+                     (sku, barcode, name, category, unit, price, cost, stock, min_stock, tax_rate, active, search_text, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
+                    params![
+                        input.sku,
+                        input.barcode,
+                        input.name,
+                        input.category,
+                        input.unit,
+                        input.price,
+                        input.cost,
+                        input.stock,
+                        input.min_stock,
+                        tax_rate,
+                        active,
+                        product_search_text(&input.sku, &input.barcode, &input.name, &input.category, &input.unit),
+                        now
+                    ],
+                )
+                .map_err(|error| error.to_string())?;
+                created += 1;
+                tx.last_insert_rowid()
+            }
+        };
+        save_product_taxes(&tx, id, &input.tax_ids)?;
+    }
+    tx.commit().map_err(|error| error.to_string())?;
+
+    Ok(ProductImportResult {
+        imported: created + updated,
+        created,
+        updated,
+        failed: 0,
+        committed: true,
+        issues: Vec::new(),
+    })
 }
 
 fn init_db(app: &AppHandle) -> CommandResult<(Connection, PathBuf)> {
@@ -1265,6 +1527,9 @@ fn migrate(conn: &Connection) -> CommandResult<()> {
 }
 
 fn seed_demo(conn: &Connection) -> CommandResult<()> {
+    #[cfg(not(debug_assertions))]
+    let _ = conn;
+
     #[cfg(debug_assertions)]
     {
         let user_count: i64 = conn
@@ -1329,130 +1594,616 @@ fn seed_demo(conn: &Connection) -> CommandResult<()> {
         }
     }
 
-    let product_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM products", [], |row| row.get(0))
-        .map_err(|error| error.to_string())?;
-    if product_count == 0 {
-        let products = [
-            (
-                "SKU-COCA-600",
-                "7501055300075",
-                "Refresco cola 600 ml",
-                "Bebidas",
-                "pieza",
-                18.0,
-                12.0,
-                48.0,
-                12.0,
-                0.16,
-            ),
-            (
-                "SKU-TORT-1K",
-                "2000000000017",
-                "Tortilla de maiz 1 kg",
-                "Abarrotes",
-                "kg",
-                24.0,
-                18.0,
-                30.0,
-                5.0,
-                0.0,
-            ),
-            (
-                "SKU-HUEVO-30",
-                "2000000000024",
-                "Huevo cartera 30 pzas",
-                "Abarrotes",
-                "pieza",
-                82.0,
-                68.0,
-                16.0,
-                4.0,
-                0.0,
-            ),
-            (
-                "SKU-SABR-45",
-                "7501011131156",
-                "Papas adobadas 45 g",
-                "Botanas",
-                "pieza",
-                17.0,
-                11.5,
-                40.0,
-                10.0,
-                0.16,
-            ),
-            (
-                "SKU-LECHE-1L",
-                "7501020513318",
-                "Leche entera 1 L",
-                "Lacteos",
-                "pieza",
-                29.5,
-                23.0,
-                24.0,
-                8.0,
-                0.0,
-            ),
-            (
-                "SKU-JABON-Z",
-                "7509546041899",
-                "Jabon zote rosa 400 g",
-                "Limpieza",
-                "pieza",
-                21.0,
-                15.0,
-                20.0,
-                6.0,
-                0.16,
-            ),
-            ("SKU-ARROZ-1K", "7501000000011", "Arroz super extra 1 kg", "Abarrotes", "pieza", 32.0, 24.0, 20.0, 0.0, 0.0),
-            ("SKU-FRIJOL-1K", "7501000000028", "Frijol pinto 1 kg", "Abarrotes", "pieza", 42.0, 33.0, 18.0, 0.0, 0.0),
-            ("SKU-AZUCAR-1K", "7501000000035", "Azucar estandar 1 kg", "Abarrotes", "pieza", 30.0, 23.0, 24.0, 0.0, 0.0),
-            ("SKU-SAL-1K", "7501000000042", "Sal refinada 1 kg", "Abarrotes", "pieza", 18.0, 12.5, 18.0, 0.0, 0.0),
-            ("SKU-ACEITE-850", "7501000000059", "Aceite vegetal 850 ml", "Abarrotes", "pieza", 48.0, 39.0, 18.0, 0.0, 0.0),
-            ("SKU-ATUN-140", "7501000000066", "Atun en agua 140 g", "Abarrotes", "pieza", 24.0, 18.0, 30.0, 0.0, 0.0),
-            ("SKU-SARDINA-425", "7501000000073", "Sardina en tomate 425 g", "Abarrotes", "pieza", 36.0, 28.0, 14.0, 0.0, 0.0),
-            ("SKU-MAYONESA-390", "7501000000080", "Mayonesa 390 g", "Abarrotes", "pieza", 54.0, 42.0, 10.0, 0.0, 0.16),
-            ("SKU-CATSUP-370", "7501000000097", "Catsup 370 g", "Abarrotes", "pieza", 34.0, 25.0, 12.0, 0.0, 0.16),
-            ("SKU-PASTA-200", "7501000000103", "Pasta sopa codito 200 g", "Abarrotes", "pieza", 13.0, 9.0, 36.0, 0.0, 0.0),
-            ("SKU-GALLETA-MARIA", "7501000000110", "Galleta Maria 170 g", "Galletas", "pieza", 18.0, 13.0, 24.0, 0.0, 0.16),
-            ("SKU-GALLETA-SAL", "7501000000127", "Galleta salada 186 g", "Galletas", "pieza", 20.0, 15.0, 24.0, 0.0, 0.16),
-            ("SKU-PAN-CAJA", "7501000000134", "Pan blanco de caja", "Panaderia", "pieza", 48.0, 38.0, 8.0, 0.0, 0.0),
-            ("SKU-BIMB-ROLES", "7501000000141", "Roles glaseados paquete", "Panaderia", "pieza", 25.0, 18.0, 12.0, 0.0, 0.16),
-            ("SKU-AGUA-600", "7501000000158", "Agua natural 600 ml", "Bebidas", "pieza", 12.0, 7.0, 48.0, 0.0, 0.0),
-            ("SKU-AGUA-1L", "7501000000165", "Agua natural 1 L", "Bebidas", "pieza", 18.0, 11.0, 36.0, 0.0, 0.0),
-            ("SKU-JUGO-1L", "7501000000172", "Jugo naranja 1 L", "Bebidas", "pieza", 32.0, 24.0, 16.0, 0.0, 0.16),
-            ("SKU-SUERO-625", "7501000000189", "Suero oral 625 ml", "Bebidas", "pieza", 24.0, 17.0, 18.0, 0.0, 0.0),
-            ("SKU-CAFE-100", "7501000000196", "Cafe soluble 100 g", "Abarrotes", "pieza", 76.0, 60.0, 8.0, 0.0, 0.16),
-            ("SKU-CHOCOLATE", "7501000000202", "Chocolate en polvo 400 g", "Abarrotes", "pieza", 48.0, 36.0, 12.0, 0.0, 0.16),
-            ("SKU-LECHE-EVAP", "7501000000219", "Leche evaporada lata", "Lacteos", "pieza", 24.0, 18.0, 24.0, 0.0, 0.0),
-            ("SKU-CREMA-450", "7501000000226", "Crema acida 450 g", "Lacteos", "pieza", 42.0, 33.0, 10.0, 0.0, 0.0),
-            ("SKU-QUESO-200", "7501000000233", "Queso fresco 200 g", "Lacteos", "pieza", 44.0, 35.0, 10.0, 0.0, 0.0),
-            ("SKU-JAMON-250", "7501000000240", "Jamon de pavo 250 g", "Carnes frias", "pieza", 52.0, 42.0, 8.0, 0.0, 0.0),
-            ("SKU-SALCHICHA", "7501000000257", "Salchicha paquete 500 g", "Carnes frias", "pieza", 46.0, 36.0, 10.0, 0.0, 0.0),
-            ("SKU-PAPEL-4", "7501000000264", "Papel higienico 4 rollos", "Higiene", "pieza", 44.0, 34.0, 18.0, 0.0, 0.16),
-            ("SKU-SERVILLETAS", "7501000000271", "Servilletas paquete", "Higiene", "pieza", 22.0, 15.0, 20.0, 0.0, 0.16),
-            ("SKU-PASTA-DENTAL", "7501000000288", "Pasta dental 100 ml", "Higiene", "pieza", 36.0, 27.0, 14.0, 0.0, 0.16),
-            ("SKU-SHAMPOO", "7501000000295", "Shampoo familiar 750 ml", "Higiene", "pieza", 68.0, 52.0, 8.0, 0.0, 0.16),
-            ("SKU-DETERGENTE-1K", "7501000000301", "Detergente polvo 1 kg", "Limpieza", "pieza", 46.0, 34.0, 18.0, 0.0, 0.16),
-            ("SKU-CLORO-1L", "7501000000318", "Cloro 1 L", "Limpieza", "pieza", 18.0, 11.0, 24.0, 0.0, 0.16),
-            ("SKU-SUAVITEL-850", "7501000000325", "Suavizante 850 ml", "Limpieza", "pieza", 28.0, 20.0, 18.0, 0.0, 0.16),
-            ("SKU-FIBRA", "7501000000332", "Fibra esponja multiusos", "Limpieza", "pieza", 14.0, 8.0, 24.0, 0.0, 0.16),
-            ("SKU-PAPAS-45", "7501000000349", "Papas sal 45 g", "Botanas", "pieza", 17.0, 11.0, 30.0, 0.0, 0.24),
-            ("SKU-CACAHUATE", "7501000000356", "Cacahuate japones 100 g", "Botanas", "pieza", 18.0, 12.0, 24.0, 0.0, 0.24),
-            ("SKU-CHICHARRON", "7501000000363", "Chicharron harina bolsa", "Botanas", "pieza", 15.0, 9.0, 30.0, 0.0, 0.24),
-            ("SKU-CHICLE", "7501000000370", "Chicle paquete", "Dulces", "pieza", 12.0, 8.0, 30.0, 0.0, 0.16),
-            ("SKU-CHOCOLATE-BARRA", "7501000000387", "Chocolate barra", "Dulces", "pieza", 16.0, 11.0, 24.0, 0.0, 0.16),
-            ("SKU-PALETA", "7501000000394", "Paleta caramelo", "Dulces", "pieza", 5.0, 3.0, 60.0, 0.0, 0.16),
-            ("SKU-PILA-AA", "7501000000400", "Pilas AA paquete", "Varios", "pieza", 38.0, 27.0, 12.0, 0.0, 0.16),
-            ("SKU-VELA", "7501000000417", "Vela blanca pieza", "Varios", "pieza", 12.0, 7.0, 18.0, 0.0, 0.16),
-            ("SKU-FOCO", "7501000000424", "Foco led 9w", "Varios", "pieza", 32.0, 22.0, 12.0, 0.0, 0.16),
-            ("SKU-CIGARRO-SUELTO", "7501000000431", "Cigarro suelto", "Tabaco", "pieza", 8.0, 6.0, 100.0, 0.0, 0.16),
-            ("SKU-ENCENDEDOR", "7501000000448", "Encendedor", "Tabaco", "pieza", 18.0, 10.0, 18.0, 0.0, 0.16),
-        ];
-        for product in products {
-            conn.execute(
+    #[cfg(debug_assertions)]
+    {
+        let product_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM products", [], |row| row.get(0))
+            .map_err(|error| error.to_string())?;
+        if product_count == 0 {
+            let products = [
+                (
+                    "SKU-COCA-600",
+                    "7501055300075",
+                    "Refresco cola 600 ml",
+                    "Bebidas",
+                    "pieza",
+                    18.0,
+                    12.0,
+                    48.0,
+                    12.0,
+                    0.16,
+                ),
+                (
+                    "SKU-TORT-1K",
+                    "2000000000017",
+                    "Tortilla de maiz 1 kg",
+                    "Abarrotes",
+                    "kg",
+                    24.0,
+                    18.0,
+                    30.0,
+                    5.0,
+                    0.0,
+                ),
+                (
+                    "SKU-HUEVO-30",
+                    "2000000000024",
+                    "Huevo cartera 30 pzas",
+                    "Abarrotes",
+                    "pieza",
+                    82.0,
+                    68.0,
+                    16.0,
+                    4.0,
+                    0.0,
+                ),
+                (
+                    "SKU-SABR-45",
+                    "7501011131156",
+                    "Papas adobadas 45 g",
+                    "Botanas",
+                    "pieza",
+                    17.0,
+                    11.5,
+                    40.0,
+                    10.0,
+                    0.16,
+                ),
+                (
+                    "SKU-LECHE-1L",
+                    "7501020513318",
+                    "Leche entera 1 L",
+                    "Lacteos",
+                    "pieza",
+                    29.5,
+                    23.0,
+                    24.0,
+                    8.0,
+                    0.0,
+                ),
+                (
+                    "SKU-JABON-Z",
+                    "7509546041899",
+                    "Jabon zote rosa 400 g",
+                    "Limpieza",
+                    "pieza",
+                    21.0,
+                    15.0,
+                    20.0,
+                    6.0,
+                    0.16,
+                ),
+                (
+                    "SKU-ARROZ-1K",
+                    "7501000000011",
+                    "Arroz super extra 1 kg",
+                    "Abarrotes",
+                    "pieza",
+                    32.0,
+                    24.0,
+                    20.0,
+                    0.0,
+                    0.0,
+                ),
+                (
+                    "SKU-FRIJOL-1K",
+                    "7501000000028",
+                    "Frijol pinto 1 kg",
+                    "Abarrotes",
+                    "pieza",
+                    42.0,
+                    33.0,
+                    18.0,
+                    0.0,
+                    0.0,
+                ),
+                (
+                    "SKU-AZUCAR-1K",
+                    "7501000000035",
+                    "Azucar estandar 1 kg",
+                    "Abarrotes",
+                    "pieza",
+                    30.0,
+                    23.0,
+                    24.0,
+                    0.0,
+                    0.0,
+                ),
+                (
+                    "SKU-SAL-1K",
+                    "7501000000042",
+                    "Sal refinada 1 kg",
+                    "Abarrotes",
+                    "pieza",
+                    18.0,
+                    12.5,
+                    18.0,
+                    0.0,
+                    0.0,
+                ),
+                (
+                    "SKU-ACEITE-850",
+                    "7501000000059",
+                    "Aceite vegetal 850 ml",
+                    "Abarrotes",
+                    "pieza",
+                    48.0,
+                    39.0,
+                    18.0,
+                    0.0,
+                    0.0,
+                ),
+                (
+                    "SKU-ATUN-140",
+                    "7501000000066",
+                    "Atun en agua 140 g",
+                    "Abarrotes",
+                    "pieza",
+                    24.0,
+                    18.0,
+                    30.0,
+                    0.0,
+                    0.0,
+                ),
+                (
+                    "SKU-SARDINA-425",
+                    "7501000000073",
+                    "Sardina en tomate 425 g",
+                    "Abarrotes",
+                    "pieza",
+                    36.0,
+                    28.0,
+                    14.0,
+                    0.0,
+                    0.0,
+                ),
+                (
+                    "SKU-MAYONESA-390",
+                    "7501000000080",
+                    "Mayonesa 390 g",
+                    "Abarrotes",
+                    "pieza",
+                    54.0,
+                    42.0,
+                    10.0,
+                    0.0,
+                    0.16,
+                ),
+                (
+                    "SKU-CATSUP-370",
+                    "7501000000097",
+                    "Catsup 370 g",
+                    "Abarrotes",
+                    "pieza",
+                    34.0,
+                    25.0,
+                    12.0,
+                    0.0,
+                    0.16,
+                ),
+                (
+                    "SKU-PASTA-200",
+                    "7501000000103",
+                    "Pasta sopa codito 200 g",
+                    "Abarrotes",
+                    "pieza",
+                    13.0,
+                    9.0,
+                    36.0,
+                    0.0,
+                    0.0,
+                ),
+                (
+                    "SKU-GALLETA-MARIA",
+                    "7501000000110",
+                    "Galleta Maria 170 g",
+                    "Galletas",
+                    "pieza",
+                    18.0,
+                    13.0,
+                    24.0,
+                    0.0,
+                    0.16,
+                ),
+                (
+                    "SKU-GALLETA-SAL",
+                    "7501000000127",
+                    "Galleta salada 186 g",
+                    "Galletas",
+                    "pieza",
+                    20.0,
+                    15.0,
+                    24.0,
+                    0.0,
+                    0.16,
+                ),
+                (
+                    "SKU-PAN-CAJA",
+                    "7501000000134",
+                    "Pan blanco de caja",
+                    "Panaderia",
+                    "pieza",
+                    48.0,
+                    38.0,
+                    8.0,
+                    0.0,
+                    0.0,
+                ),
+                (
+                    "SKU-BIMB-ROLES",
+                    "7501000000141",
+                    "Roles glaseados paquete",
+                    "Panaderia",
+                    "pieza",
+                    25.0,
+                    18.0,
+                    12.0,
+                    0.0,
+                    0.16,
+                ),
+                (
+                    "SKU-AGUA-600",
+                    "7501000000158",
+                    "Agua natural 600 ml",
+                    "Bebidas",
+                    "pieza",
+                    12.0,
+                    7.0,
+                    48.0,
+                    0.0,
+                    0.0,
+                ),
+                (
+                    "SKU-AGUA-1L",
+                    "7501000000165",
+                    "Agua natural 1 L",
+                    "Bebidas",
+                    "pieza",
+                    18.0,
+                    11.0,
+                    36.0,
+                    0.0,
+                    0.0,
+                ),
+                (
+                    "SKU-JUGO-1L",
+                    "7501000000172",
+                    "Jugo naranja 1 L",
+                    "Bebidas",
+                    "pieza",
+                    32.0,
+                    24.0,
+                    16.0,
+                    0.0,
+                    0.16,
+                ),
+                (
+                    "SKU-SUERO-625",
+                    "7501000000189",
+                    "Suero oral 625 ml",
+                    "Bebidas",
+                    "pieza",
+                    24.0,
+                    17.0,
+                    18.0,
+                    0.0,
+                    0.0,
+                ),
+                (
+                    "SKU-CAFE-100",
+                    "7501000000196",
+                    "Cafe soluble 100 g",
+                    "Abarrotes",
+                    "pieza",
+                    76.0,
+                    60.0,
+                    8.0,
+                    0.0,
+                    0.16,
+                ),
+                (
+                    "SKU-CHOCOLATE",
+                    "7501000000202",
+                    "Chocolate en polvo 400 g",
+                    "Abarrotes",
+                    "pieza",
+                    48.0,
+                    36.0,
+                    12.0,
+                    0.0,
+                    0.16,
+                ),
+                (
+                    "SKU-LECHE-EVAP",
+                    "7501000000219",
+                    "Leche evaporada lata",
+                    "Lacteos",
+                    "pieza",
+                    24.0,
+                    18.0,
+                    24.0,
+                    0.0,
+                    0.0,
+                ),
+                (
+                    "SKU-CREMA-450",
+                    "7501000000226",
+                    "Crema acida 450 g",
+                    "Lacteos",
+                    "pieza",
+                    42.0,
+                    33.0,
+                    10.0,
+                    0.0,
+                    0.0,
+                ),
+                (
+                    "SKU-QUESO-200",
+                    "7501000000233",
+                    "Queso fresco 200 g",
+                    "Lacteos",
+                    "pieza",
+                    44.0,
+                    35.0,
+                    10.0,
+                    0.0,
+                    0.0,
+                ),
+                (
+                    "SKU-JAMON-250",
+                    "7501000000240",
+                    "Jamon de pavo 250 g",
+                    "Carnes frias",
+                    "pieza",
+                    52.0,
+                    42.0,
+                    8.0,
+                    0.0,
+                    0.0,
+                ),
+                (
+                    "SKU-SALCHICHA",
+                    "7501000000257",
+                    "Salchicha paquete 500 g",
+                    "Carnes frias",
+                    "pieza",
+                    46.0,
+                    36.0,
+                    10.0,
+                    0.0,
+                    0.0,
+                ),
+                (
+                    "SKU-PAPEL-4",
+                    "7501000000264",
+                    "Papel higienico 4 rollos",
+                    "Higiene",
+                    "pieza",
+                    44.0,
+                    34.0,
+                    18.0,
+                    0.0,
+                    0.16,
+                ),
+                (
+                    "SKU-SERVILLETAS",
+                    "7501000000271",
+                    "Servilletas paquete",
+                    "Higiene",
+                    "pieza",
+                    22.0,
+                    15.0,
+                    20.0,
+                    0.0,
+                    0.16,
+                ),
+                (
+                    "SKU-PASTA-DENTAL",
+                    "7501000000288",
+                    "Pasta dental 100 ml",
+                    "Higiene",
+                    "pieza",
+                    36.0,
+                    27.0,
+                    14.0,
+                    0.0,
+                    0.16,
+                ),
+                (
+                    "SKU-SHAMPOO",
+                    "7501000000295",
+                    "Shampoo familiar 750 ml",
+                    "Higiene",
+                    "pieza",
+                    68.0,
+                    52.0,
+                    8.0,
+                    0.0,
+                    0.16,
+                ),
+                (
+                    "SKU-DETERGENTE-1K",
+                    "7501000000301",
+                    "Detergente polvo 1 kg",
+                    "Limpieza",
+                    "pieza",
+                    46.0,
+                    34.0,
+                    18.0,
+                    0.0,
+                    0.16,
+                ),
+                (
+                    "SKU-CLORO-1L",
+                    "7501000000318",
+                    "Cloro 1 L",
+                    "Limpieza",
+                    "pieza",
+                    18.0,
+                    11.0,
+                    24.0,
+                    0.0,
+                    0.16,
+                ),
+                (
+                    "SKU-SUAVITEL-850",
+                    "7501000000325",
+                    "Suavizante 850 ml",
+                    "Limpieza",
+                    "pieza",
+                    28.0,
+                    20.0,
+                    18.0,
+                    0.0,
+                    0.16,
+                ),
+                (
+                    "SKU-FIBRA",
+                    "7501000000332",
+                    "Fibra esponja multiusos",
+                    "Limpieza",
+                    "pieza",
+                    14.0,
+                    8.0,
+                    24.0,
+                    0.0,
+                    0.16,
+                ),
+                (
+                    "SKU-PAPAS-45",
+                    "7501000000349",
+                    "Papas sal 45 g",
+                    "Botanas",
+                    "pieza",
+                    17.0,
+                    11.0,
+                    30.0,
+                    0.0,
+                    0.24,
+                ),
+                (
+                    "SKU-CACAHUATE",
+                    "7501000000356",
+                    "Cacahuate japones 100 g",
+                    "Botanas",
+                    "pieza",
+                    18.0,
+                    12.0,
+                    24.0,
+                    0.0,
+                    0.24,
+                ),
+                (
+                    "SKU-CHICHARRON",
+                    "7501000000363",
+                    "Chicharron harina bolsa",
+                    "Botanas",
+                    "pieza",
+                    15.0,
+                    9.0,
+                    30.0,
+                    0.0,
+                    0.24,
+                ),
+                (
+                    "SKU-CHICLE",
+                    "7501000000370",
+                    "Chicle paquete",
+                    "Dulces",
+                    "pieza",
+                    12.0,
+                    8.0,
+                    30.0,
+                    0.0,
+                    0.16,
+                ),
+                (
+                    "SKU-CHOCOLATE-BARRA",
+                    "7501000000387",
+                    "Chocolate barra",
+                    "Dulces",
+                    "pieza",
+                    16.0,
+                    11.0,
+                    24.0,
+                    0.0,
+                    0.16,
+                ),
+                (
+                    "SKU-PALETA",
+                    "7501000000394",
+                    "Paleta caramelo",
+                    "Dulces",
+                    "pieza",
+                    5.0,
+                    3.0,
+                    60.0,
+                    0.0,
+                    0.16,
+                ),
+                (
+                    "SKU-PILA-AA",
+                    "7501000000400",
+                    "Pilas AA paquete",
+                    "Varios",
+                    "pieza",
+                    38.0,
+                    27.0,
+                    12.0,
+                    0.0,
+                    0.16,
+                ),
+                (
+                    "SKU-VELA",
+                    "7501000000417",
+                    "Vela blanca pieza",
+                    "Varios",
+                    "pieza",
+                    12.0,
+                    7.0,
+                    18.0,
+                    0.0,
+                    0.16,
+                ),
+                (
+                    "SKU-FOCO",
+                    "7501000000424",
+                    "Foco led 9w",
+                    "Varios",
+                    "pieza",
+                    32.0,
+                    22.0,
+                    12.0,
+                    0.0,
+                    0.16,
+                ),
+                (
+                    "SKU-CIGARRO-SUELTO",
+                    "7501000000431",
+                    "Cigarro suelto",
+                    "Tabaco",
+                    "pieza",
+                    8.0,
+                    6.0,
+                    100.0,
+                    0.0,
+                    0.16,
+                ),
+                (
+                    "SKU-ENCENDEDOR",
+                    "7501000000448",
+                    "Encendedor",
+                    "Tabaco",
+                    "pieza",
+                    18.0,
+                    10.0,
+                    18.0,
+                    0.0,
+                    0.16,
+                ),
+            ];
+            for product in products {
+                conn.execute(
                 "INSERT INTO products
                 (sku, barcode, name, category, unit, price, cost, stock, min_stock, tax_rate, active, search_text, created_at, updated_at)
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?12, ?12)",
@@ -1472,6 +2223,7 @@ fn seed_demo(conn: &Connection) -> CommandResult<()> {
                 ],
             )
             .map_err(|error| error.to_string())?;
+            }
         }
     }
     Ok(())
@@ -1835,13 +2587,21 @@ fn product_search(
     limit: Option<i64>,
 ) -> CommandResult<Vec<Product>> {
     let limit = limit.unwrap_or(30).clamp(1, 100);
+    let conn = state.db.lock().map_err(|error| error.to_string())?;
+    require_active_user(&conn, actor_id)?;
+    product_search_with_conn(&conn, &query, limit)
+}
+
+fn product_search_with_conn(
+    conn: &Connection,
+    query: &str,
+    limit: i64,
+) -> CommandResult<Vec<Product>> {
     let trimmed = query.trim();
     let normalized = normalize_catalog_text(trimmed);
     let normalized_code = normalize_catalog_code(trimmed);
     let like = format!("%{}%", normalized);
     let raw_like = format!("%{}%", trimmed.to_lowercase());
-    let conn = state.db.lock().map_err(|error| error.to_string())?;
-    require_active_user(&conn, actor_id)?;
     let mut stmt = conn
         .prepare(
             "SELECT id, sku, barcode, name, category, unit, price, cost, stock, min_stock, tax_rate, active
@@ -1870,6 +2630,43 @@ fn product_search(
             params![normalized, trimmed, normalized_code, like, raw_like, limit],
             map_product,
         )
+        .map_err(|error| error.to_string())?;
+    let mut products = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    for product in &mut products {
+        hydrate_product_taxes(conn, product)?;
+    }
+    Ok(products)
+}
+
+#[tauri::command]
+fn product_get_many(
+    state: State<'_, AppState>,
+    actor_id: i64,
+    ids: Vec<i64>,
+) -> CommandResult<Vec<Product>> {
+    let mut ids = ids.into_iter().filter(|id| *id > 0).collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids.dedup();
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let conn = state.db.lock().map_err(|error| error.to_string())?;
+    require_active_user(&conn, actor_id)?;
+    let placeholders = std::iter::repeat("?")
+        .take(ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT id, sku, barcode, name, category, unit, price, cost, stock, min_stock, tax_rate, active
+         FROM products
+         WHERE active = 1 AND id IN ({placeholders})
+         ORDER BY name"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map(params_from_iter(ids.iter()), map_product)
         .map_err(|error| error.to_string())?;
     let mut products = rows
         .collect::<Result<Vec<_>, _>>()
@@ -1957,6 +2754,17 @@ fn product_upsert(
     };
     save_product_taxes(&conn, id, &input.tax_ids)?;
     get_product(&conn, id)
+}
+
+#[tauri::command]
+fn product_bulk_import(
+    state: State<'_, AppState>,
+    actor_id: i64,
+    rows: Vec<ProductImportRow>,
+) -> CommandResult<ProductImportResult> {
+    let mut conn = state.db.lock().map_err(|error| error.to_string())?;
+    require_permission(&conn, actor_id, "products")?;
+    import_products_with_conn(&mut conn, rows)
 }
 
 #[tauri::command]
@@ -2631,6 +3439,10 @@ fn map_active_sale_draft(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActiveSale
 #[tauri::command]
 fn held_ticket_list(state: State<'_, AppState>) -> CommandResult<Vec<HeldTicket>> {
     let conn = state.db.lock().map_err(|error| error.to_string())?;
+    held_ticket_list_with_conn(&conn)
+}
+
+fn held_ticket_list_with_conn(conn: &Connection) -> CommandResult<Vec<HeldTicket>> {
     let mut stmt = conn
         .prepare(
             "SELECT h.id, h.name, h.cashier_id, u.name, h.item_count, h.items_json, h.total, h.created_at, h.updated_at
@@ -2653,7 +3465,7 @@ fn held_ticket_save(
 ) -> CommandResult<HeldTicket> {
     let conn = state.db.lock().map_err(|error| error.to_string())?;
     let tax_enabled = setting_bool(&conn, "tax_enabled", true)?;
-    let prices_include_tax = true;
+    let prices_include_tax = setting_bool(&conn, "tax_prices_include_tax", true)?;
     let (name, item_count, total) =
         validate_held_ticket_input(&input, prices_include_tax, tax_enabled)?;
     let items_json = serde_json::to_string(&input.items).map_err(|error| error.to_string())?;
@@ -2729,7 +3541,7 @@ fn active_sale_draft_save(
 ) -> CommandResult<ActiveSaleDraft> {
     let conn = state.db.lock().map_err(|error| error.to_string())?;
     let tax_enabled = setting_bool(&conn, "tax_enabled", true)?;
-    let prices_include_tax = true;
+    let prices_include_tax = setting_bool(&conn, "tax_prices_include_tax", true)?;
     let (item_count, total) =
         validate_active_sale_draft_input(&input, prices_include_tax, tax_enabled)?;
     let items_json = serde_json::to_string(&input.items).map_err(|error| error.to_string())?;
@@ -2781,8 +3593,7 @@ fn active_sale_draft_clear(state: State<'_, AppState>, cashier_id: i64) -> Comma
     Ok(())
 }
 
-#[tauri::command]
-fn sale_create(state: State<'_, AppState>, draft: SaleDraft) -> CommandResult<SaleReceipt> {
+fn create_sale_with_conn(conn: &mut Connection, draft: SaleDraft) -> CommandResult<SaleReceipt> {
     if draft.items.is_empty() {
         return Err("Venta sin articulos".into());
     }
@@ -2790,10 +3601,9 @@ fn sale_create(state: State<'_, AppState>, draft: SaleDraft) -> CommandResult<Sa
         return Err("Venta sin pagos".into());
     }
 
-    let mut conn = state.db.lock().map_err(|error| error.to_string())?;
-    require_active_user(&conn, draft.cashier_id)?;
-    let tax_enabled = setting_bool(&conn, "tax_enabled", true)?;
-    let prices_include_tax = true;
+    require_active_user(conn, draft.cashier_id)?;
+    let tax_enabled = setting_bool(conn, "tax_enabled", true)?;
+    let prices_include_tax = setting_bool(conn, "tax_prices_include_tax", true)?;
     let tx = conn.transaction().map_err(|error| error.to_string())?;
     let workstation_id = current_workstation_id(&tx)?;
     let (shift_id, cash_session_id) = get_open_shift(&tx, &workstation_id)?
@@ -2978,6 +3788,12 @@ fn sale_create(state: State<'_, AppState>, draft: SaleDraft) -> CommandResult<Sa
 }
 
 #[tauri::command]
+fn sale_create(state: State<'_, AppState>, draft: SaleDraft) -> CommandResult<SaleReceipt> {
+    let mut conn = state.db.lock().map_err(|error| error.to_string())?;
+    create_sale_with_conn(&mut conn, draft)
+}
+
+#[tauri::command]
 fn sale_list(
     state: State<'_, AppState>,
     actor_id: i64,
@@ -3021,9 +3837,8 @@ fn sale_list(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
-fn sale_cancel(
-    state: State<'_, AppState>,
+fn cancel_sale_with_conn(
+    conn: &mut Connection,
     sale_id: i64,
     actor_id: i64,
     reason: String,
@@ -3031,14 +3846,27 @@ fn sale_cancel(
     if reason.trim().len() < 2 {
         return Err("Motivo requerido".into());
     }
-    let mut conn = state.db.lock().map_err(|error| error.to_string())?;
-    require_admin(&conn, actor_id)?;
+    require_admin(conn, actor_id)?;
     let tx = conn.transaction().map_err(|error| error.to_string())?;
-    let (status, cash_session_id, total, created_at): (String, Option<i64>, f64, String) = tx
+    let (status, cash_session_id, shift_id, total, created_at): (
+        String,
+        Option<i64>,
+        Option<i64>,
+        f64,
+        String,
+    ) = tx
         .query_row(
-            "SELECT status, cash_session_id, total, created_at FROM sales WHERE id = ?1",
+            "SELECT status, cash_session_id, shift_id, total, created_at FROM sales WHERE id = ?1",
             params![sale_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .map_err(|_| "Venta no encontrada".to_string())?;
     if status == "canceled" {
@@ -3122,6 +3950,15 @@ fn sale_cancel(
             params![total, cash_paid - change_due, session_id],
         )
         .map_err(|error| error.to_string())?;
+        if let Some(shift_id) = shift_id {
+            tx.execute(
+                "UPDATE shifts
+                 SET expected_cash = expected_cash - ?1
+                 WHERE id = ?2 AND status = 'open'",
+                params![cash_paid - change_due, shift_id],
+            )
+            .map_err(|error| error.to_string())?;
+        }
     }
     tx.execute(
         "INSERT INTO audit_log (actor_id, action, entity, entity_id, details, created_at)
@@ -3134,14 +3971,23 @@ fn sale_cancel(
 }
 
 #[tauri::command]
-fn cash_session_open(
+fn sale_cancel(
     state: State<'_, AppState>,
+    sale_id: i64,
+    actor_id: i64,
+    reason: String,
+) -> CommandResult<()> {
+    let mut conn = state.db.lock().map_err(|error| error.to_string())?;
+    cancel_sale_with_conn(&mut conn, sale_id, actor_id, reason)
+}
+
+fn open_cash_session_with_conn(
+    conn: &Connection,
     opened_by: i64,
     opening_cash: f64,
 ) -> CommandResult<CashSession> {
-    let conn = state.db.lock().map_err(|error| error.to_string())?;
-    require_active_user(&conn, opened_by)?;
-    let workstation_id = current_workstation_id(&conn)?;
+    require_active_user(conn, opened_by)?;
+    let workstation_id = current_workstation_id(conn)?;
     let existing: Option<i64> = conn
         .query_row(
             "SELECT id FROM cash_sessions WHERE status = 'open' AND workstation_id = ?1 ORDER BY id DESC LIMIT 1",
@@ -3167,7 +4013,17 @@ fn cash_session_open(
         params![cash_session_id, opened_by, opened_at, opening_cash],
     )
     .map_err(|error| error.to_string())?;
-    get_cash_session(&conn, cash_session_id)
+    get_cash_session(conn, cash_session_id)
+}
+
+#[tauri::command]
+fn cash_session_open(
+    state: State<'_, AppState>,
+    opened_by: i64,
+    opening_cash: f64,
+) -> CommandResult<CashSession> {
+    let conn = state.db.lock().map_err(|error| error.to_string())?;
+    open_cash_session_with_conn(&conn, opened_by, opening_cash)
 }
 
 fn map_cash_movement(row: &rusqlite::Row<'_>) -> rusqlite::Result<CashMovement> {
@@ -3286,8 +4142,14 @@ fn map_cash_count(row: &rusqlite::Row<'_>) -> rusqlite::Result<CashCount> {
     })
 }
 
-fn create_cash_count_with_conn(conn: &Connection, input: &CashCountInput) -> CommandResult<CashCount> {
-    if !input.expected_cash.is_finite() || !input.counted_cash.is_finite() || input.counted_cash < 0.0 {
+fn create_cash_count_with_conn(
+    conn: &Connection,
+    input: &CashCountInput,
+) -> CommandResult<CashCount> {
+    if !input.expected_cash.is_finite()
+        || !input.counted_cash.is_finite()
+        || input.counted_cash < 0.0
+    {
         return Err("Arqueo invalido".into());
     }
     let count_type = match input.count_type.as_str() {
@@ -3332,9 +4194,16 @@ fn create_cash_count_with_conn(conn: &Connection, input: &CashCountInput) -> Com
          VALUES (?1, ?2, 'cash_count', ?3, ?4, ?5)",
         params![
             input.actor_id,
-            if count_type == "close" { "cash_count_close" } else { "cash_count_audit" },
+            if count_type == "close" {
+                "cash_count_close"
+            } else {
+                "cash_count_audit"
+            },
             id,
-            format!("esperado {:.2}, contado {:.2}, diferencia {:.2}", input.expected_cash, input.counted_cash, difference),
+            format!(
+                "esperado {:.2}, contado {:.2}, diferencia {:.2}",
+                input.expected_cash, input.counted_cash, difference
+            ),
             now
         ],
     )
@@ -3415,9 +4284,8 @@ fn shift_cut_x(
     calculate_shift_cut(&conn, next_shift_id)
 }
 
-#[tauri::command]
-fn shift_cut_z(
-    state: State<'_, AppState>,
+fn close_shift_cut_z_with_conn(
+    conn: &mut Connection,
     shift_id: i64,
     closing_cash: f64,
     closed_by: i64,
@@ -3427,8 +4295,7 @@ fn shift_cut_z(
     if closing_cash < 0.0 {
         return Err("Efectivo contado invalido".into());
     }
-    let mut conn = state.db.lock().map_err(|error| error.to_string())?;
-    require_active_user(&conn, closed_by)?;
+    require_active_user(conn, closed_by)?;
     let tx = conn.transaction().map_err(|error| error.to_string())?;
     let (status, cash_session_id): (String, i64) = tx
         .query_row(
@@ -3528,6 +4395,26 @@ fn shift_cut_z(
 }
 
 #[tauri::command]
+fn shift_cut_z(
+    state: State<'_, AppState>,
+    shift_id: i64,
+    closing_cash: f64,
+    closed_by: i64,
+    denominations_json: Option<String>,
+    difference_reason: Option<String>,
+) -> CommandResult<ShiftCutSnapshot> {
+    let mut conn = state.db.lock().map_err(|error| error.to_string())?;
+    close_shift_cut_z_with_conn(
+        &mut conn,
+        shift_id,
+        closing_cash,
+        closed_by,
+        denominations_json,
+        difference_reason,
+    )
+}
+
+#[tauri::command]
 fn monthly_sales_report(
     state: State<'_, AppState>,
     actor_id: i64,
@@ -3593,7 +4480,10 @@ fn shift_cut_history(
         .map_err(|error| error.to_string())?;
     let mut cuts = Vec::new();
     for row in rows {
-        cuts.push(calculate_shift_cut(&conn, row.map_err(|error| error.to_string())?)?);
+        cuts.push(calculate_shift_cut(
+            &conn,
+            row.map_err(|error| error.to_string())?,
+        )?);
     }
     Ok(cuts)
 }
@@ -3604,7 +4494,10 @@ fn shift_cut_text(conn: &Connection, shift_id: i64) -> CommandResult<String> {
     let width = ticket_setting_i64(conn, "ticket_width", 32, 24, 48)? as usize;
     let separator = ticket_separator(width);
     let mut text = String::new();
-    text.push_str(&format!("{store_name}\nCORTE {}\n{separator}\n", snapshot.shift_id));
+    text.push_str(&format!(
+        "{store_name}\nCORTE {}\n{separator}\n",
+        snapshot.shift_id
+    ));
     text.push_str(&format!("Apertura: {}\n", snapshot.opened_at));
     if let Some(closed_at) = &snapshot.closed_at {
         text.push_str(&format!("Cierre: {closed_at}\n"));
@@ -3619,14 +4512,21 @@ fn shift_cut_text(conn: &Connection, shift_id: i64) -> CommandResult<String> {
     text.push_str(&format!("Esperado: ${:.2}\n", snapshot.expected_cash));
     if let Some(counted) = snapshot.counted_cash.or(snapshot.closing_cash) {
         text.push_str(&format!("Contado: ${counted:.2}\n"));
-        text.push_str(&format!("Diferencia: ${:.2}\n", counted - snapshot.expected_cash));
+        text.push_str(&format!(
+            "Diferencia: ${:.2}\n",
+            counted - snapshot.expected_cash
+        ));
     }
     text.push_str(&format!("{separator}\n"));
     Ok(text)
 }
 
 #[tauri::command]
-fn print_shift_cut(state: State<'_, AppState>, actor_id: i64, shift_id: i64) -> CommandResult<HardwareResult> {
+fn print_shift_cut(
+    state: State<'_, AppState>,
+    actor_id: i64,
+    shift_id: i64,
+) -> CommandResult<HardwareResult> {
     let conn = state.db.lock().map_err(|error| error.to_string())?;
     require_active_user(&conn, actor_id)?;
     let printer = ticket_setting(&conn, "printer", "")?;
@@ -3851,37 +4751,41 @@ fn calculate_shift_cut(conn: &Connection, shift_id: i64) -> CommandResult<ShiftC
     })
 }
 
-#[tauri::command]
-fn dashboard_summary(state: State<'_, AppState>, actor_id: i64) -> CommandResult<DashboardSummary> {
-    let conn = state.db.lock().map_err(|error| error.to_string())?;
-    require_active_user(&conn, actor_id)?;
-    let workstation_id = current_workstation_id(&conn)?;
-    let active_products = conn
+fn today_utc_bounds() -> CommandResult<(String, String)> {
+    let start = Utc::now()
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| "Fecha actual invalida".to_string())?
+        .and_utc();
+    let end = start + Duration::days(1);
+    Ok((start.to_rfc3339(), end.to_rfc3339()))
+}
+
+fn dashboard_summary_with_conn(
+    conn: &Connection,
+    actor_id: i64,
+) -> CommandResult<DashboardSummary> {
+    require_active_user(conn, actor_id)?;
+    let workstation_id = current_workstation_id(conn)?;
+    let (active_products, low_stock_products): (i64, i64) = conn
         .query_row(
-            "SELECT COUNT(*) FROM products WHERE active = 1",
+            "SELECT
+                COUNT(*),
+                COALESCE(SUM(CASE WHEN stock <= 0 THEN 1 ELSE 0 END), 0)
+             FROM products
+             WHERE active = 1",
             [],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|error| error.to_string())?;
-    let low_stock_products = conn
+    let (start, end) = today_utc_bounds()?;
+    let (today_sales, today_tickets): (f64, i64) = conn
         .query_row(
-            "SELECT COUNT(*) FROM products WHERE active = 1 AND stock <= 0",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|error| error.to_string())?;
-    let today_sales = conn
-        .query_row(
-            "SELECT COALESCE(SUM(total), 0) FROM sales WHERE date(created_at) = date('now')",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|error| error.to_string())?;
-    let today_tickets = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sales WHERE date(created_at) = date('now')",
-            [],
-            |row| row.get(0),
+            "SELECT COALESCE(SUM(total), 0), COUNT(*)
+             FROM sales
+             WHERE created_at >= ?1 AND created_at < ?2",
+            params![start, end],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|error| error.to_string())?;
     let open_cash_session_id: Option<i64> = conn
@@ -3893,7 +4797,7 @@ fn dashboard_summary(state: State<'_, AppState>, actor_id: i64) -> CommandResult
         .optional()
         .map_err(|error| error.to_string())?;
     let open_cash_session = match open_cash_session_id {
-        Some(id) => Some(get_cash_session(&conn, id)?),
+        Some(id) => Some(get_cash_session(conn, id)?),
         None => None,
     };
     Ok(DashboardSummary {
@@ -3902,6 +4806,29 @@ fn dashboard_summary(state: State<'_, AppState>, actor_id: i64) -> CommandResult
         today_sales,
         today_tickets,
         open_cash_session,
+    })
+}
+
+#[tauri::command]
+fn dashboard_summary(state: State<'_, AppState>, actor_id: i64) -> CommandResult<DashboardSummary> {
+    let conn = state.db.lock().map_err(|error| error.to_string())?;
+    dashboard_summary_with_conn(&conn, actor_id)
+}
+
+#[tauri::command]
+fn app_bootstrap(state: State<'_, AppState>, actor_id: i64) -> CommandResult<AppBootstrap> {
+    let conn = state.db.lock().map_err(|error| error.to_string())?;
+    let summary = dashboard_summary_with_conn(&conn, actor_id)?;
+    let products = product_search_with_conn(&conn, "", 40)?;
+    let held_tickets = held_ticket_list_with_conn(&conn)?;
+    let tax_enabled = setting_bool(&conn, "tax_enabled", true)?;
+    let tax_prices_include_tax = setting_bool(&conn, "tax_prices_include_tax", true)?;
+    Ok(AppBootstrap {
+        summary,
+        products,
+        held_tickets,
+        tax_enabled,
+        tax_prices_include_tax,
     })
 }
 
@@ -4181,179 +5108,6 @@ fn report_movement_history(
         .map_err(|error| error.to_string())
 }
 
-fn clean_device_text(value: &str) -> String {
-    value
-        .chars()
-        .filter(|character| !character.is_control())
-        .collect::<String>()
-        .trim()
-        .chars()
-        .take(180)
-        .collect()
-}
-
-fn command_lines(program: &str, args: &[&str]) -> Vec<String> {
-    let Ok(output) = Command::new(program).args(args).output() else {
-        return Vec::new();
-    };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(clean_device_text)
-        .filter(|line| !line.is_empty())
-        .collect()
-}
-
-fn add_device(
-    devices: &mut Vec<HardwareDevice>,
-    seen: &mut HashSet<String>,
-    device: HardwareDevice,
-) {
-    if seen.insert(format!("{}:{}", device.device_type, device.id)) {
-        devices.push(device);
-    }
-}
-
-fn detect_unix_printers(devices: &mut Vec<HardwareDevice>, seen: &mut HashSet<String>) {
-    let default_printer = command_lines("lpstat", &["-d"])
-        .into_iter()
-        .find_map(|line| {
-            line.strip_prefix("system default destination: ")
-                .map(str::to_string)
-        });
-    let uri_lines = command_lines("lpstat", &["-v"]);
-    for line in command_lines("lpstat", &["-p"]) {
-        let Some(rest) = line.strip_prefix("printer ") else {
-            continue;
-        };
-        let name = rest.split_whitespace().next().unwrap_or("").trim();
-        if name.is_empty() {
-            continue;
-        }
-        let detail = uri_lines
-            .iter()
-            .find_map(|uri_line| {
-                uri_line
-                    .strip_prefix(&format!("device for {name}: "))
-                    .map(str::to_string)
-            })
-            .unwrap_or_else(|| "Impresora del sistema".into());
-        add_device(
-            devices,
-            seen,
-            HardwareDevice {
-                id: name.into(),
-                name: name.into(),
-                device_type: "printer".into(),
-                connection: "system".into(),
-                detail,
-                is_default: default_printer.as_deref() == Some(name),
-            },
-        );
-    }
-}
-
-fn detect_windows_printers(devices: &mut Vec<HardwareDevice>, seen: &mut HashSet<String>) {
-    let command = "Get-Printer | ForEach-Object { \"$($_.Name)|$($_.DriverName)|$($_.PortName)\" }";
-    for line in command_lines("powershell", &["-NoProfile", "-Command", command]) {
-        let parts: Vec<&str> = line.split('|').collect();
-        let name = clean_device_text(parts.first().copied().unwrap_or(""));
-        if name.is_empty() {
-            continue;
-        }
-        let driver = clean_device_text(parts.get(1).copied().unwrap_or(""));
-        let port = clean_device_text(parts.get(2).copied().unwrap_or(""));
-        add_device(
-            devices,
-            seen,
-            HardwareDevice {
-                id: name.clone(),
-                name,
-                device_type: "printer".into(),
-                connection: "windows-printer".into(),
-                detail: format!("{driver} {port}").trim().into(),
-                is_default: false,
-            },
-        );
-    }
-}
-
-fn detect_serial_paths(devices: &mut Vec<HardwareDevice>, seen: &mut HashSet<String>) {
-    #[cfg(windows)]
-    {
-        let command =
-            "Get-CimInstance Win32_SerialPort | ForEach-Object { \"$($_.DeviceID)|$($_.Name)\" }";
-        for line in command_lines("powershell", &["-NoProfile", "-Command", command]) {
-            let parts: Vec<&str> = line.split('|').collect();
-            let id = clean_device_text(parts.first().copied().unwrap_or(""));
-            if id.is_empty() {
-                continue;
-            }
-            let name = clean_device_text(parts.get(1).copied().unwrap_or(&id));
-            add_device(
-                devices,
-                seen,
-                HardwareDevice {
-                    id: id.clone(),
-                    name,
-                    device_type: "serial".into(),
-                    connection: "serial".into(),
-                    detail: "Puerto serial local".into(),
-                    is_default: false,
-                },
-            );
-        }
-    }
-
-    #[cfg(not(windows))]
-    {
-        let prefixes = [
-            "ttyUSB", "ttyACM", "tty.usb", "cu.usb", "ttyS", "cu.SLAB", "tty.SLAB",
-        ];
-        if let Ok(entries) = fs::read_dir("/dev") {
-            for entry in entries.flatten() {
-                let filename = entry.file_name().to_string_lossy().to_string();
-                if !prefixes.iter().any(|prefix| filename.starts_with(prefix)) {
-                    continue;
-                }
-                let path = format!("/dev/{filename}");
-                add_device(
-                    devices,
-                    seen,
-                    HardwareDevice {
-                        id: path.clone(),
-                        name: filename,
-                        device_type: "serial".into(),
-                        connection: "serial".into(),
-                        detail: path,
-                        is_default: false,
-                    },
-                );
-            }
-        }
-        if let Ok(entries) = fs::read_dir("/dev/serial/by-id") {
-            for entry in entries.flatten() {
-                let path = entry.path().to_string_lossy().to_string();
-                let name = entry.file_name().to_string_lossy().to_string();
-                add_device(
-                    devices,
-                    seen,
-                    HardwareDevice {
-                        id: path.clone(),
-                        name,
-                        device_type: "serial".into(),
-                        connection: "serial-by-id".into(),
-                        detail: path,
-                        is_default: false,
-                    },
-                );
-            }
-        }
-    }
-}
-
 #[tauri::command]
 fn hardware_device_list(
     state: State<'_, AppState>,
@@ -4362,115 +5116,7 @@ fn hardware_device_list(
     let conn = state.db.lock().map_err(|error| error.to_string())?;
     require_admin(&conn, actor_id)?;
     drop(conn);
-    let mut devices = Vec::new();
-    let mut seen = HashSet::new();
-    let os = env::consts::OS;
-    if os == "windows" {
-        detect_windows_printers(&mut devices, &mut seen);
-    } else {
-        detect_unix_printers(&mut devices, &mut seen);
-    }
-    detect_serial_paths(&mut devices, &mut seen);
-
-    if devices.is_empty() {
-        add_device(
-            &mut devices,
-            &mut seen,
-            HardwareDevice {
-                id: "mock-printer-80mm".into(),
-                name: "Mock 80mm".into(),
-                device_type: "printer".into(),
-                connection: "mock".into(),
-                detail: "Dispositivo de prueba".into(),
-                is_default: true,
-            },
-        );
-    }
-    Ok(devices)
-}
-
-fn temp_hardware_file(prefix: &str, extension: &str) -> PathBuf {
-    let clean_prefix = prefix
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric() || *character == '-')
-        .collect::<String>();
-    env::temp_dir().join(format!(
-        "{clean_prefix}-{}.{}",
-        Utc::now().timestamp_nanos_opt().unwrap_or(0),
-        extension
-    ))
-}
-
-#[cfg(windows)]
-fn ps_single_quote(value: &str) -> String {
-    value.replace('\'', "''")
-}
-
-fn run_print_file(printer: &str, file: &PathBuf, raw: bool) -> CommandResult<()> {
-    let printer = clean_device_text(printer);
-    if printer.is_empty() || printer.starts_with("mock-") {
-        return Err("Configura una impresora real en Configuracion".into());
-    }
-    #[cfg(windows)]
-    {
-        if raw {
-            return Err("Pulso raw de cajon no soportado por PowerShell. Usa impresora ESC/POS compartida por puerto raw.".into());
-        }
-        let path = ps_single_quote(&file.to_string_lossy());
-        let printer = ps_single_quote(&printer);
-        let command = format!("Get-Content -Raw '{path}' | Out-Printer -Name '{printer}'");
-        let output = Command::new("powershell")
-            .arg("-NoProfile")
-            .arg("-Command")
-            .arg(command)
-            .output()
-            .map_err(|error| format!("No se pudo imprimir: {error}"))?;
-        if output.status.success() {
-            return Ok(());
-        }
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-    }
-
-    #[cfg(not(windows))]
-    {
-        let file_path = file.to_string_lossy().to_string();
-        let mut command = Command::new("lp");
-        if raw {
-            command.args(["-o", "raw"]);
-        }
-        let output = command
-            .arg("-d")
-            .arg(&printer)
-            .arg(&file_path)
-            .output()
-            .map_err(|error| format!("No se pudo imprimir con lp: {error}"))?;
-        if output.status.success() {
-            return Ok(());
-        }
-        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
-    }
-}
-
-fn write_raw_device(device: &str, bytes: &[u8]) -> CommandResult<bool> {
-    let device = clean_device_text(device);
-    if device.is_empty() || device.starts_with("mock-") {
-        return Ok(false);
-    }
-    let direct = device.starts_with("/dev/")
-        || device.to_ascii_uppercase().starts_with("COM")
-        || device.starts_with("\\\\.\\");
-    if !direct {
-        return Ok(false);
-    }
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .open(&device)
-        .map_err(|error| format!("No se pudo abrir dispositivo {device}: {error}"))?;
-    file.write_all(bytes)
-        .map_err(|error| format!("No se pudo escribir a {device}: {error}"))?;
-    file.flush()
-        .map_err(|error| format!("No se pudo cerrar envio a {device}: {error}"))?;
-    Ok(true)
+    Ok(device_list())
 }
 
 fn ticket_setting(conn: &Connection, key: &str, default: &str) -> CommandResult<String> {
@@ -4671,8 +5317,7 @@ fn open_cash_drawer(state: State<'_, AppState>) -> CommandResult<HardwareResult>
         });
     }
     let file = temp_hardware_file("rim-pos-drawer", "bin");
-    fs::write(&file, pulse)
-        .map_err(|error| format!("No se pudo crear pulso de cajon: {error}"))?;
+    fs::write(&file, pulse).map_err(|error| format!("No se pudo crear pulso de cajon: {error}"))?;
     run_print_file(&drawer, &file, true)?;
     let _ = fs::remove_file(file);
     Ok(HardwareResult {
@@ -4685,12 +5330,15 @@ fn open_cash_drawer(state: State<'_, AppState>) -> CommandResult<HardwareResult>
 fn read_scale(state: State<'_, AppState>) -> CommandResult<ScaleReading> {
     let conn = state.db.lock().map_err(|error| error.to_string())?;
     let scale = setting_string(&conn, "scale")?.unwrap_or_default();
-    if scale.is_empty() || scale.starts_with("mock-") {
-        return Err("Configura una bascula serial real en Configuracion".into());
-    }
-    Err(format!(
-        "Bascula {scale} detectada, pero lectura serial requiere protocolo del modelo. No se devuelve peso simulado."
-    ))
+    let baud_rate = ticket_setting_i64(&conn, "scale_baud_rate", 9600, 1200, 115200)? as u32;
+    drop(conn);
+    let (weight, raw) = read_serial_scale(&scale, baud_rate, 1200)?;
+    Ok(ScaleReading {
+        ok: true,
+        weight,
+        unit: "kg".into(),
+        source: raw,
+    })
 }
 
 #[tauri::command]
@@ -4879,7 +5527,9 @@ fn backup_list(state: State<'_, AppState>, actor_id: i64) -> CommandResult<Vec<B
                 .modified()
                 .ok()
                 .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|duration| chrono::DateTime::<Utc>::from(std::time::UNIX_EPOCH + duration).to_rfc3339())
+                .map(|duration| {
+                    chrono::DateTime::<Utc>::from(std::time::UNIX_EPOCH + duration).to_rfc3339()
+                })
                 .unwrap_or_else(now_iso),
         });
     }
@@ -4918,10 +5568,33 @@ fn backup_auto_if_due(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        average_ticket, hash_pin, legacy_hash_pin, line_amounts, next_monthly_seq, period_key,
-        validation, verify_pin, visible_monthly_folio,
-    };
+    use super::*;
+    use rusqlite::{params, Connection};
+
+    fn flow_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO users (id, name, pin_hash, role, active, created_at)
+             VALUES (?1, ?2, ?3, 'admin', 1, ?4)",
+            params![1, "Admin", hash_pin("123456").unwrap(), now_iso()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO users (id, name, pin_hash, role, active, created_at)
+             VALUES (?1, ?2, ?3, 'cashier', 1, ?4)",
+            params![2, "Cajera", hash_pin("111111").unwrap(), now_iso()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO products
+             (id, sku, barcode, name, category, unit, price, cost, stock, min_stock, tax_rate, active, search_text, created_at, updated_at)
+             VALUES (1, 'SKU-TEST', '750000000001', 'Producto test', 'Abarrotes', 'pieza', 20, 10, 5, 1, 0, 1, 'producto test', ?1, ?1)",
+            params![now_iso()],
+        )
+        .unwrap();
+        conn
+    }
 
     #[test]
     fn monthly_sequence_is_max_plus_one() {
@@ -4991,6 +5664,188 @@ mod tests {
             (0.0, 0.0, 0.0)
         );
     }
+
+    #[test]
+    fn product_bulk_import_is_all_or_nothing() {
+        let mut conn = flow_conn();
+        let result = import_products_with_conn(
+            &mut conn,
+            vec![
+                ProductImportRow {
+                    row_number: 2,
+                    sku: "SKU-NEW".into(),
+                    barcode: "750000000002".into(),
+                    name: "Nuevo".into(),
+                    category: "Abarrotes".into(),
+                    unit: "pieza".into(),
+                    price: 12.0,
+                    cost: 8.0,
+                    stock: 3.0,
+                    min_stock: 1.0,
+                    tax_rate: 0.0,
+                    tax_ids: vec![],
+                    active: true,
+                },
+                ProductImportRow {
+                    row_number: 3,
+                    sku: "SKU-BAD".into(),
+                    barcode: "750000000003".into(),
+                    name: "Malo".into(),
+                    category: "Abarrotes".into(),
+                    unit: "pieza".into(),
+                    price: -1.0,
+                    cost: 8.0,
+                    stock: 3.0,
+                    min_stock: 1.0,
+                    tax_rate: 0.0,
+                    tax_ids: vec![],
+                    active: true,
+                },
+            ],
+        )
+        .unwrap();
+        assert!(!result.committed);
+        assert_eq!(result.imported, 0);
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM products WHERE sku = 'SKU-NEW'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn sale_cancel_and_shift_cut_restore_stock_and_cash() {
+        let mut conn = flow_conn();
+        let session = open_cash_session_with_conn(&conn, 2, 100.0).unwrap();
+        let shift_id: i64 = conn
+            .query_row(
+                "SELECT id FROM shifts WHERE cash_session_id = ?1",
+                params![session.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        let receipt = create_sale_with_conn(
+            &mut conn,
+            SaleDraft {
+                cashier_id: 2,
+                customer_id: None,
+                items: vec![SaleItemInput {
+                    product_id: 1,
+                    quantity: 2.0,
+                    unit_price: 20.0,
+                    discount: 0.0,
+                }],
+                payments: vec![PaymentInput {
+                    method: "cash".into(),
+                    amount: 50.0,
+                    reference: None,
+                }],
+                notes: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(receipt.total, 40.0);
+        let stock_after_sale: f64 = conn
+            .query_row("SELECT stock FROM products WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(stock_after_sale, 3.0);
+        let cash_after_sale: f64 = conn
+            .query_row(
+                "SELECT expected_cash FROM cash_sessions WHERE id = ?1",
+                params![session.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cash_after_sale, 140.0);
+
+        cancel_sale_with_conn(&mut conn, receipt.sale_id, 1, "Error de captura".into()).unwrap();
+        let stock_after_cancel: f64 = conn
+            .query_row("SELECT stock FROM products WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(stock_after_cancel, 5.0);
+        let cash_after_cancel: f64 = conn
+            .query_row(
+                "SELECT expected_cash FROM cash_sessions WHERE id = ?1",
+                params![session.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cash_after_cancel, 100.0);
+
+        let second = create_sale_with_conn(
+            &mut conn,
+            SaleDraft {
+                cashier_id: 2,
+                customer_id: None,
+                items: vec![SaleItemInput {
+                    product_id: 1,
+                    quantity: 1.0,
+                    unit_price: 20.0,
+                    discount: 0.0,
+                }],
+                payments: vec![PaymentInput {
+                    method: "cash".into(),
+                    amount: 20.0,
+                    reference: None,
+                }],
+                notes: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(second.total, 20.0);
+        let snapshot =
+            close_shift_cut_z_with_conn(&mut conn, shift_id, 120.0, 2, Some("[]".into()), None)
+                .unwrap();
+        assert_eq!(snapshot.status, "closed");
+        assert_eq!(snapshot.total_tickets, 1);
+        assert_eq!(snapshot.canceled_tickets, 1);
+        assert_eq!(snapshot.expected_cash, 120.0);
+        assert_eq!(snapshot.cash_difference, Some(0.0));
+    }
+
+    #[test]
+    fn held_ticket_validation_reports_bad_rows_before_save() {
+        let invalid = HeldTicketInput {
+            id: None,
+            name: "A".into(),
+            cashier_id: 2,
+            items: vec![HeldTicketItem {
+                product_id: 1,
+                quantity: 1.0,
+                unit_price: 20.0,
+                discount: 0.0,
+                tax_rate: 0.0,
+            }],
+        };
+        assert_eq!(
+            validate_held_ticket_input(&invalid, true, true).unwrap_err(),
+            "Nombre de ticket muy corto"
+        );
+
+        let valid = HeldTicketInput {
+            id: None,
+            name: "Cliente mostrador".into(),
+            cashier_id: 2,
+            items: vec![HeldTicketItem {
+                product_id: 1,
+                quantity: 2.0,
+                unit_price: 20.0,
+                discount: 5.0,
+                tax_rate: 0.0,
+            }],
+        };
+        let (_, item_count, total) = validate_held_ticket_input(&valid, true, true).unwrap();
+        assert_eq!(item_count, 1);
+        assert_eq!(total, 35.0);
+    }
 }
 
 pub fn run() {
@@ -5006,7 +5861,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             product_search,
+            product_get_many,
             product_upsert,
+            product_bulk_import,
             product_delete,
             inventory_adjust,
             inventory_kardex,
@@ -5047,6 +5904,7 @@ pub fn run() {
             cash_count_create,
             cash_count_list,
             dashboard_summary,
+            app_bootstrap,
             report_summary,
             report_product_sales,
             report_movement_history,

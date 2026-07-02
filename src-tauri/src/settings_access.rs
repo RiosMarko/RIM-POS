@@ -18,6 +18,7 @@ pub fn is_public_setting_key(key: &str) -> bool {
             | "ticket_start_lines"
             | "ticket_extra_lines"
             | "ticket_copies"
+            | "scale_baud_rate"
     )
 }
 

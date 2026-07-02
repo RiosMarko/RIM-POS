@@ -1,10 +1,10 @@
-import { PackagePlus, Search, Trash2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, PackagePlus, Search, Trash2 } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ConfirmDraft } from "../../components/modals/CommonModals";
 import { downloadCsv, parseCsvLine } from "../../lib/csv";
 import { money } from "../../lib/money";
-import { deleteProduct, getSetting, listTaxes, upsertProduct } from "../../lib/posApi";
-import type { Product, TaxOption } from "../../types";
+import { bulkImportProducts, deleteProduct, getSetting, listTaxes, upsertProduct } from "../../lib/posApi";
+import type { Product, ProductImportIssue, ProductImportResult, ProductImportRow, TaxOption } from "../../types";
 
 const emptyProductForm = {
   sku: "",
@@ -30,6 +30,12 @@ const fallbackTaxOptions: TaxOption[] = [
 ];
 
 const normalizeBarcode = (value: string) => value.replace(/[^0-9A-Za-z]/g, "").trim();
+
+type ImportPreview = {
+  fileName: string;
+  rows: ProductImportRow[];
+  issues: ProductImportIssue[];
+};
 
 const suggestCategory = (name: string, fallback = "Abarrotes") => {
   const value = name.toLowerCase().normalize("NFD").replace(/\p{Diacritic}/gu, "");
@@ -63,6 +69,8 @@ export function ProductsView({
   const [busy, setBusy] = useState(false);
   const [catalogQuery, setCatalogQuery] = useState("");
   const [editorOpen, setEditorOpen] = useState(false);
+  const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
+  const [lastImportResult, setLastImportResult] = useState<ProductImportResult | null>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
 
   const activeTaxOptions = useMemo(() => taxOptions.length ? taxOptions : fallbackTaxOptions, [taxOptions]);
@@ -180,21 +188,26 @@ export function ProductsView({
     downloadCsv(`productos-rim-pos-${new Date().toISOString().slice(0, 10)}.csv`, [header, ...rows]);
   };
 
-  const importProducts = async (file: File) => {
+  const parseImportFile = async (file: File) => {
     try {
       const text = await file.text();
       const [headerLine, ...lines] = text.split(/\r?\n/).filter((line) => line.trim());
       if (!headerLine) throw new Error("CSV vacio");
       const headers = parseCsvLine(headerLine).map((header) => header.trim());
-      let imported = 0;
-      for (const line of lines) {
+      const nextRows: ProductImportRow[] = [];
+      const nextIssues: ProductImportIssue[] = [];
+      const seenSkus = new Set<string>();
+      const seenBarcodes = new Set<string>();
+      lines.forEach((line, index) => {
         const values = parseCsvLine(line);
         const row = Object.fromEntries(headers.map((header, index) => [header, values[index] ?? ""]));
-        if (!row.name) continue;
+        const rowNumber = index + 2;
+        if (!row.name) return;
         const barcode = normalizeBarcode(row.barcode || row.sku || "");
-        const sku = (row.sku || barcode || `SKU-${Date.now()}-${imported}`).trim().toUpperCase();
+        const sku = (row.sku || barcode || `SKU-${Date.now()}-${index}`).trim().toUpperCase();
         const name = row.name.trim().replace(/\s+/g, " ");
-        await upsertProduct({
+        const parsed: ProductImportRow = {
+          row_number: rowNumber,
           sku,
           barcode,
           name,
@@ -207,15 +220,56 @@ export function ProductsView({
           tax_ids: String(row.tax_ids || "").split("|").map(Number).filter((value) => Number.isFinite(value) && value > 0),
           tax_rate: Number(row.tax_rate || 0),
           active: row.active !== "false",
-        });
-        imported += 1;
+        };
+        const issue = (message: string) => nextIssues.push({ row_number: rowNumber, sku, barcode, message });
+        if (parsed.sku.length < 2) issue("SKU requerido");
+        if (parsed.barcode.length < 2) issue("Codigo requerido");
+        if (parsed.name.length < 2) issue("Nombre requerido");
+        if ([parsed.price, parsed.cost, parsed.stock, parsed.min_stock, parsed.tax_rate].some((value) => !Number.isFinite(value) || value < 0)) {
+          issue("Importe o existencia invalida");
+        }
+        const skuKey = parsed.sku.toLowerCase();
+        if (seenSkus.has(skuKey)) issue("SKU duplicado en archivo");
+        seenSkus.add(skuKey);
+        if (seenBarcodes.has(parsed.barcode)) issue("Codigo duplicado en archivo");
+        seenBarcodes.add(parsed.barcode);
+        nextRows.push(parsed);
+      });
+      if (nextRows.length === 0) {
+        nextIssues.push({ row_number: 0, sku: "", barcode: "", message: "CSV sin productos" });
       }
-      await refreshProducts(catalogQuery);
-      showToast(`${imported} productos importados`);
+      setLastImportResult(null);
+      setImportPreview({ fileName: file.name, rows: nextRows, issues: nextIssues });
+      showToast(`${nextRows.length} filas listas para revisar`);
     } catch (error) {
       showToast(String(error));
     } finally {
       if (importInputRef.current) importInputRef.current.value = "";
+    }
+  };
+
+  const commitImport = async () => {
+    if (!importPreview) return;
+    if (importPreview.issues.length > 0) {
+      showToast("Corrige errores antes de importar");
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await bulkImportProducts(importPreview.rows);
+      setLastImportResult(result);
+      if (result.committed) {
+        setImportPreview(null);
+        await refreshProducts(catalogQuery);
+        showToast(`${result.imported} productos importados`);
+      } else {
+        setImportPreview({ ...importPreview, issues: result.issues });
+        showToast("Importacion detenida, no se guardo ningun producto");
+      }
+    } catch (error) {
+      showToast(String(error));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -234,7 +288,7 @@ export function ProductsView({
             accept=".csv,text/csv"
             onChange={(event) => {
               const file = event.target.files?.[0];
-              if (file) importProducts(file);
+              if (file) parseImportFile(file);
             }}
           />
           <button className="ghost-button" type="button" onClick={() => importInputRef.current?.click()}>Importar CSV</button>
@@ -259,6 +313,75 @@ export function ProductsView({
           placeholder="Buscar producto por nombre, codigo, SKU o departamento"
         />
       </form>
+      {importPreview && (
+        <section className="import-review" aria-label="Revision de importacion CSV">
+          <div className="import-review-header">
+            <div>
+              <h3>{importPreview.fileName}</h3>
+              <p>
+                {importPreview.rows.length} filas detectadas. La importacion guarda todo o nada.
+              </p>
+            </div>
+            <div className={importPreview.issues.length ? "import-status warning" : "import-status success"}>
+              {importPreview.issues.length ? <AlertTriangle size={18} /> : <CheckCircle2 size={18} />}
+              <span>
+                {importPreview.issues.length ? `${importPreview.issues.length} errores` : "Listo para importar"}
+              </span>
+            </div>
+          </div>
+          {importPreview.issues.length > 0 ? (
+            <div className="import-issues" role="status">
+              {importPreview.issues.slice(0, 8).map((issue) => (
+                <div className="import-issue-row" key={`${issue.row_number}-${issue.message}-${issue.sku}-${issue.barcode}`}>
+                  <strong>Fila {issue.row_number}</strong>
+                  <span>{issue.sku || issue.barcode || "sin codigo"}</span>
+                  <em>{issue.message}</em>
+                </div>
+              ))}
+              {importPreview.issues.length > 8 && (
+                <div className="import-issue-row muted">
+                  <strong>+{importPreview.issues.length - 8}</strong>
+                  <span>errores mas</span>
+                  <em>Corrige CSV y vuelve a cargarlo</em>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="import-preview-grid" role="status">
+              <div>
+                <span>Nuevas/actualizadas</span>
+                <strong>{importPreview.rows.length}</strong>
+              </div>
+              <div>
+                <span>Primera fila</span>
+                <strong>{importPreview.rows[0]?.name ?? "Sin productos"}</strong>
+              </div>
+            </div>
+          )}
+          <div className="import-review-actions">
+            <button className="ghost-button" type="button" onClick={() => setImportPreview(null)}>
+              Cancelar importacion
+            </button>
+            <button className="primary-button" type="button" disabled={busy || importPreview.issues.length > 0} onClick={commitImport}>
+              Importar productos
+            </button>
+          </div>
+        </section>
+      )}
+      {lastImportResult && !lastImportResult.committed && (
+        <section className="import-review import-review-error" aria-label="Errores de importacion">
+          <div className="import-review-header">
+            <div>
+              <h3>Importacion detenida</h3>
+              <p>No se guardo ningun producto. Corrige CSV y vuelve a intentarlo.</p>
+            </div>
+            <div className="import-status warning">
+              <AlertTriangle size={18} />
+              <span>{lastImportResult.failed} errores</span>
+            </div>
+          </div>
+        </section>
+      )}
       {editorOpen && (
       <form className="product-editor" onSubmit={save}>
         <label className="field-span-2">
