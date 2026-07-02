@@ -1,12 +1,13 @@
 {
   "name": "pos-abarrotes",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
+    "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build --bundles app",
     "tauri:build:installers": "tauri build",
