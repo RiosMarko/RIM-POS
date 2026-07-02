@@ -16,6 +16,8 @@ export function SaleView({
   cashReceived,
   cardReceived,
   transferReceived,
+  cardTerminals,
+  selectedCardTerminal,
   lastReceipt,
   heldTickets,
   activeHeldTicketId,
@@ -28,6 +30,7 @@ export function SaleView({
   setCashReceived,
   setCardReceived,
   setTransferReceived,
+  setSelectedCardTerminal,
   refreshProducts,
   submitSearch,
   addProduct,
@@ -38,6 +41,7 @@ export function SaleView({
   newTicket,
   recoverHeldTicket,
   removeHeldTicket,
+  runFunctionKeyAction,
   showToast,
   openHeldTickets,
 }: {
@@ -51,6 +55,8 @@ export function SaleView({
   cashReceived: string;
   cardReceived: string;
   transferReceived: string;
+  cardTerminals: string[];
+  selectedCardTerminal: string;
   lastReceipt: SaleReceipt | null;
   heldTickets: HeldTicket[];
   activeHeldTicketId: number | null;
@@ -63,6 +69,7 @@ export function SaleView({
   setCashReceived: (value: string) => void;
   setCardReceived: (value: string) => void;
   setTransferReceived: (value: string) => void;
+  setSelectedCardTerminal: (value: string) => void;
   refreshProducts: (query?: string) => Promise<void>;
   submitSearch: (event?: FormEvent) => Promise<void>;
   addProduct: (product: Product, quantity?: number) => void;
@@ -73,6 +80,7 @@ export function SaleView({
   newTicket: () => void | Promise<void>;
   recoverHeldTicket: (ticket: HeldTicket) => Promise<void>;
   removeHeldTicket: (ticket: HeldTicket) => Promise<void>;
+  runFunctionKeyAction: (key: string) => void | Promise<void>;
   showToast: (message: string) => void;
   openHeldTickets: () => void;
 }) {
@@ -84,7 +92,6 @@ export function SaleView({
     return products.filter((product) =>
         product.name.toLowerCase().includes(normalizedQuery) ||
         product.category.toLowerCase().includes(normalizedQuery) ||
-        product.sku.toLowerCase().includes(normalizedQuery) ||
         product.barcode.includes(normalizedQuery),
       ).slice(0, 6);
   }, [normalizedQuery, products]);
@@ -297,6 +304,20 @@ export function SaleView({
               onFocus={selectNumericInput}
               onChange={(event) => setCardReceived(event.target.value)}
             />
+            {(Number(cardReceived) || 0) > 0 && (
+              <div className="card-terminal-panel">
+                {cardTerminals.length > 0 ? (
+                  <select value={selectedCardTerminal} onChange={(event) => setSelectedCardTerminal(event.target.value)}>
+                    <option value="">Seleccionar terminal</option>
+                    {cardTerminals.map((terminal) => (
+                      <option value={terminal} key={terminal}>{terminal}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <small className="card-terminal-empty">Agrega terminales en Config.</small>
+                )}
+              </div>
+            )}
           </label>
           <label className="field-label">
             Crédito
@@ -335,10 +356,18 @@ export function SaleView({
 
         <div className="function-key-grid compact">
           {functionKeys.map((item) => (
-            <span className={item.compactLabel ? "compact-label" : undefined} key={item.key}>
+            <button
+              className={item.compactLabel ? "compact-label" : undefined}
+              key={item.key}
+              title={item.title}
+              type="button"
+              onClick={() => {
+                runFunctionKeyAction(item.key);
+              }}
+            >
               <kbd>{item.key}</kbd>
               <span className="function-key-label">{item.label}</span>
-            </span>
+            </button>
           ))}
         </div>
 

@@ -56,6 +56,7 @@ export function CashDialog({
   expectedCash,
   totalSales,
   tickets,
+  cashierName,
   onClose,
   onOpenCash,
   onMovement,
@@ -66,6 +67,7 @@ export function CashDialog({
   expectedCash: number;
   totalSales: number;
   tickets: number;
+  cashierName: string;
   onClose: () => void;
   onOpenCash: (amount: number) => void;
   onMovement: (type: "in" | "out", amount: number, reason: string) => Promise<void>;
@@ -83,7 +85,7 @@ export function CashDialog({
   const diff = Number.isFinite(countedValue) ? countedValue - expectedCash : 0;
   const needsReason = kind === "in" || kind === "out";
   const needsDifferenceReason = (kind === "audit" || kind === "close") && Math.round(diff * 100) !== 0;
-  const title = kind === "open" ? "Abrir caja" : kind === "in" ? "Entrada de efectivo" : kind === "out" ? "Retiro de efectivo" : kind === "audit" ? "Arqueo de caja" : "Corte Z final";
+  const title = kind === "open" ? "Abrir caja" : kind === "in" ? "Entrada de efectivo" : kind === "out" ? "Retiro de efectivo" : kind === "audit" ? "Arqueo de caja" : "Corte del dia";
   const denominationsJson = JSON.stringify(denominations.map((value) => ({
     denomination: value,
     quantity: Number(counts[String(value)]) || 0,
@@ -106,7 +108,7 @@ export function CashDialog({
           <Banknote size={24} />
           <div>
             <h2>{title}</h2>
-            <p>{tickets} tickets, vendido {money(totalSales)}, esperado {money(expectedCash)}</p>
+            <p>{cashierName} · {tickets} tickets, vendido {money(totalSales)}, esperado {money(expectedCash)}{kind === "close" ? " · Corte Z final" : ""}</p>
           </div>
         </div>
         <form className="dialog-form" onSubmit={submit}>

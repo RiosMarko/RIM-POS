@@ -46,6 +46,7 @@ struct Product {
     category: String,
     unit: String,
     price: f64,
+    wholesale_price: Option<f64>,
     cost: f64,
     stock: f64,
     min_stock: f64,
@@ -63,6 +64,7 @@ struct ProductInput {
     category: String,
     unit: String,
     price: f64,
+    wholesale_price: Option<f64>,
     cost: f64,
     stock: f64,
     min_stock: f64,
@@ -81,6 +83,7 @@ struct ProductImportRow {
     category: String,
     unit: String,
     price: f64,
+    wholesale_price: Option<f64>,
     cost: f64,
     stock: f64,
     min_stock: f64,
@@ -225,6 +228,8 @@ struct ShiftCutSnapshot {
     status: String,
     opened_at: String,
     closed_at: Option<String>,
+    opened_by_name: Option<String>,
+    closed_by_name: Option<String>,
     total_tickets: i64,
     canceled_tickets: i64,
     gross_sales: f64,
@@ -241,6 +246,27 @@ struct ShiftCutSnapshot {
     counted_cash: Option<f64>,
     cash_difference: Option<f64>,
     difference_reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DailyCutSummary {
+    date: String,
+    cut_count: i64,
+    total_tickets: i64,
+    canceled_tickets: i64,
+    gross_sales: f64,
+    net_sales: f64,
+    tax: f64,
+    discount: f64,
+    cash_paid: f64,
+    card_paid: f64,
+    transfer_paid: f64,
+    average_ticket: f64,
+    opening_cash: f64,
+    expected_cash: f64,
+    counted_cash: f64,
+    cash_difference: f64,
+    cuts: Vec<ShiftCutSnapshot>,
 }
 
 #[derive(Debug, Serialize)]
@@ -401,8 +427,18 @@ struct ReportSummary {
 struct ProductSalesReport {
     product_id: i64,
     product_name: String,
+    category: String,
     quantity: f64,
     total: f64,
+    gross_profit: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct TaxBreakdown {
+    tax_rate: f64,
+    taxable_sales: f64,
+    tax_collected: f64,
+    gross_sales: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -412,9 +448,12 @@ struct ReportMovement {
     title: String,
     detail: String,
     amount: f64,
+    gross_profit: f64,
     cash_paid: f64,
     card_paid: f64,
     transfer_paid: f64,
+    tax_total: f64,
+    card_terminal: Option<String>,
     actor_name: Option<String>,
     cash_session_id: Option<i64>,
     created_at: String,
@@ -660,12 +699,13 @@ fn map_product(row: &rusqlite::Row<'_>) -> rusqlite::Result<Product> {
         category: row.get(4)?,
         unit: row.get(5)?,
         price: row.get(6)?,
-        cost: row.get(7)?,
-        stock: row.get(8)?,
-        min_stock: row.get(9)?,
-        tax_rate: row.get(10)?,
+        wholesale_price: row.get(7)?,
+        cost: row.get(8)?,
+        stock: row.get(9)?,
+        min_stock: row.get(10)?,
+        tax_rate: row.get(11)?,
         tax_ids: Vec::new(),
-        active: row.get::<_, i64>(11)? == 1,
+        active: row.get::<_, i64>(12)? == 1,
     })
 }
 
@@ -782,22 +822,17 @@ fn import_products_with_conn(
     }
 
     let mut issues = Vec::new();
-    let mut seen_skus = HashSet::new();
     let mut seen_barcodes = HashSet::new();
     let mut prepared = Vec::new();
 
     for row in rows {
-        let sku = row.sku.trim();
         let barcode = row.barcode.trim();
+        let sku = barcode;
         let name = row.name.trim();
         let category = row.category.trim();
         let unit = row.unit.trim();
 
-        if let Err(message) = validate_required_text(sku, 2, "SKU requerido") {
-            issues.push(product_import_issue(&row, message));
-            continue;
-        }
-        if let Err(message) = validate_required_text(barcode, 2, "Codigo requerido") {
+        if let Err(message) = validate_required_text(barcode, 1, "Codigo requerido") {
             issues.push(product_import_issue(&row, message));
             continue;
         }
@@ -816,6 +851,7 @@ fn import_products_with_conn(
         let mut numeric_error = None;
         for (value, label) in [
             (row.price, "Precio invalido"),
+            (row.wholesale_price.unwrap_or(0.0), "Mayoreo invalido"),
             (row.cost, "Costo invalido"),
             (row.stock, "Stock invalido"),
             (row.min_stock, "Minimo invalido"),
@@ -831,11 +867,6 @@ fn import_products_with_conn(
             continue;
         }
 
-        let normalized_sku = sku.to_ascii_lowercase();
-        if !seen_skus.insert(normalized_sku) {
-            issues.push(product_import_issue(&row, "SKU duplicado en archivo"));
-            continue;
-        }
         if !seen_barcodes.insert(barcode.to_string()) {
             issues.push(product_import_issue(&row, "Codigo duplicado en archivo"));
             continue;
@@ -850,6 +881,7 @@ fn import_products_with_conn(
                 category: category.to_string(),
                 unit: unit.to_string(),
                 price: row.price,
+                wholesale_price: row.wholesale_price,
                 cost: row.cost,
                 stock: row.stock,
                 min_stock: row.min_stock,
@@ -884,8 +916,9 @@ fn import_products_with_conn(
                 tx.execute(
                     "UPDATE products
                      SET sku = ?1, barcode = ?2, name = ?3, category = ?4, unit = ?5, price = ?6,
-                         cost = ?7, stock = ?8, min_stock = ?9, tax_rate = ?10, active = ?11, search_text = ?12, updated_at = ?13
-                     WHERE id = ?14",
+                         wholesale_price = ?7, cost = ?8, stock = ?9, min_stock = ?10, tax_rate = ?11,
+                         active = ?12, search_text = ?13, updated_at = ?14
+                     WHERE id = ?15",
                     params![
                         input.sku,
                         input.barcode,
@@ -893,6 +926,7 @@ fn import_products_with_conn(
                         input.category,
                         input.unit,
                         input.price,
+                        input.wholesale_price,
                         input.cost,
                         input.stock,
                         input.min_stock,
@@ -910,8 +944,8 @@ fn import_products_with_conn(
             None => {
                 tx.execute(
                     "INSERT INTO products
-                     (sku, barcode, name, category, unit, price, cost, stock, min_stock, tax_rate, active, search_text, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
+                     (sku, barcode, name, category, unit, price, wholesale_price, cost, stock, min_stock, tax_rate, active, search_text, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)",
                     params![
                         input.sku,
                         input.barcode,
@@ -919,6 +953,7 @@ fn import_products_with_conn(
                         input.category,
                         input.unit,
                         input.price,
+                        input.wholesale_price,
                         input.cost,
                         input.stock,
                         input.min_stock,
@@ -1005,6 +1040,7 @@ fn migrate(conn: &Connection) -> CommandResult<()> {
           category TEXT NOT NULL,
           unit TEXT NOT NULL DEFAULT 'pieza',
           price REAL NOT NULL,
+          wholesale_price REAL,
           cost REAL NOT NULL DEFAULT 0,
           stock REAL NOT NULL DEFAULT 0,
           min_stock REAL NOT NULL DEFAULT 0,
@@ -1354,6 +1390,7 @@ fn migrate(conn: &Connection) -> CommandResult<()> {
     let _ = conn.execute("ALTER TABLE products ADD COLUMN description TEXT", []);
     let _ = conn.execute("ALTER TABLE products ADD COLUMN sat_product_key TEXT", []);
     let _ = conn.execute("ALTER TABLE products ADD COLUMN sat_unit_key TEXT", []);
+    let _ = conn.execute("ALTER TABLE products ADD COLUMN wholesale_price REAL", []);
     let _ = conn.execute(
         "ALTER TABLE products ADD COLUMN search_text TEXT NOT NULL DEFAULT ''",
         [],
@@ -1388,6 +1425,7 @@ fn migrate(conn: &Connection) -> CommandResult<()> {
         "
         CREATE INDEX IF NOT EXISTS idx_products_active_name ON products(active, name);
         CREATE INDEX IF NOT EXISTS idx_products_active_category ON products(active, category);
+        CREATE INDEX IF NOT EXISTS idx_products_active_barcode ON products(active, barcode);
         CREATE INDEX IF NOT EXISTS idx_products_active_stock ON products(active, stock);
         CREATE INDEX IF NOT EXISTS idx_products_active_search ON products(active, search_text);
         CREATE INDEX IF NOT EXISTS idx_product_taxes_tax_id ON product_taxes(tax_id);
@@ -2205,8 +2243,8 @@ fn seed_demo(conn: &Connection) -> CommandResult<()> {
             for product in products {
                 conn.execute(
                 "INSERT INTO products
-                (sku, barcode, name, category, unit, price, cost, stock, min_stock, tax_rate, active, search_text, created_at, updated_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?12, ?12)",
+                (sku, barcode, name, category, unit, price, wholesale_price, cost, stock, min_stock, tax_rate, active, search_text, created_at, updated_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, 1, ?11, ?12, ?12)",
                 params![
                     product.0,
                     product.1,
@@ -2585,17 +2623,20 @@ fn product_search(
     actor_id: i64,
     query: String,
     limit: Option<i64>,
+    offset: Option<i64>,
 ) -> CommandResult<Vec<Product>> {
-    let limit = limit.unwrap_or(30).clamp(1, 100);
+    let limit = limit.unwrap_or(30).clamp(1, 50_000);
+    let offset = offset.unwrap_or(0).max(0);
     let conn = state.db.lock().map_err(|error| error.to_string())?;
     require_active_user(&conn, actor_id)?;
-    product_search_with_conn(&conn, &query, limit)
+    product_search_with_conn(&conn, &query, limit, offset)
 }
 
 fn product_search_with_conn(
     conn: &Connection,
     query: &str,
     limit: i64,
+    offset: i64,
 ) -> CommandResult<Vec<Product>> {
     let trimmed = query.trim();
     let normalized = normalize_catalog_text(trimmed);
@@ -2604,7 +2645,7 @@ fn product_search_with_conn(
     let raw_like = format!("%{}%", trimmed.to_lowercase());
     let mut stmt = conn
         .prepare(
-            "SELECT id, sku, barcode, name, category, unit, price, cost, stock, min_stock, tax_rate, active
+            "SELECT id, sku, barcode, name, category, unit, price, wholesale_price, cost, stock, min_stock, tax_rate, active
              FROM products
              WHERE active = 1
                AND (?1 = ''
@@ -2617,17 +2658,19 @@ fn product_search_with_conn(
                     OR lower(sku) LIKE ?5)
              ORDER BY
                CASE
+                 WHEN ?1 = '' THEN 0
                  WHEN barcode = ?2 OR lower(sku) = ?3 THEN 0
                  WHEN search_text LIKE ?4 THEN 1
                  ELSE 2
                END,
+               lower(barcode),
                name
-             LIMIT ?6",
+             LIMIT ?6 OFFSET ?7",
         )
         .map_err(|error| error.to_string())?;
     let rows = stmt
         .query_map(
-            params![normalized, trimmed, normalized_code, like, raw_like, limit],
+            params![normalized, trimmed, normalized_code, like, raw_like, limit, offset],
             map_product,
         )
         .map_err(|error| error.to_string())?;
@@ -2659,7 +2702,7 @@ fn product_get_many(
         .collect::<Vec<_>>()
         .join(",");
     let sql = format!(
-        "SELECT id, sku, barcode, name, category, unit, price, cost, stock, min_stock, tax_rate, active
+        "SELECT id, sku, barcode, name, category, unit, price, wholesale_price, cost, stock, min_stock, tax_rate, active
          FROM products
          WHERE active = 1 AND id IN ({placeholders})
          ORDER BY name"
@@ -2688,10 +2731,11 @@ fn product_upsert(
     let name = input.name.trim();
     let category = input.category.trim();
     let unit = input.unit.trim();
-    validate_required_text(sku, 2, "Producto incompleto")?;
-    validate_required_text(barcode, 2, "Producto incompleto")?;
+    validate_required_text(sku, 1, "Producto incompleto")?;
+    validate_required_text(barcode, 1, "Producto incompleto")?;
     validate_required_text(name, 2, "Producto incompleto")?;
     validate_non_negative(input.price, "Importe o existencia invalida")?;
+    validate_non_negative(input.wholesale_price.unwrap_or(0.0), "Importe o existencia invalida")?;
     validate_non_negative(input.cost, "Importe o existencia invalida")?;
     validate_non_negative(input.stock, "Importe o existencia invalida")?;
     validate_non_negative(input.min_stock, "Importe o existencia invalida")?;
@@ -2705,8 +2749,9 @@ fn product_upsert(
             conn.execute(
                 "UPDATE products
                  SET sku = ?1, barcode = ?2, name = ?3, category = ?4, unit = ?5, price = ?6,
-                     cost = ?7, stock = ?8, min_stock = ?9, tax_rate = ?10, active = ?11, search_text = ?12, updated_at = ?13
-                 WHERE id = ?14",
+                     wholesale_price = ?7, cost = ?8, stock = ?9, min_stock = ?10, tax_rate = ?11,
+                     active = ?12, search_text = ?13, updated_at = ?14
+                 WHERE id = ?15",
                 params![
                     sku,
                     barcode,
@@ -2714,6 +2759,7 @@ fn product_upsert(
                     category,
                     unit,
                     input.price,
+                    input.wholesale_price,
                     input.cost,
                     input.stock,
                     input.min_stock,
@@ -2730,8 +2776,8 @@ fn product_upsert(
         None => {
             conn.execute(
                 "INSERT INTO products
-                 (sku, barcode, name, category, unit, price, cost, stock, min_stock, tax_rate, active, search_text, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
+                 (sku, barcode, name, category, unit, price, wholesale_price, cost, stock, min_stock, tax_rate, active, search_text, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)",
                 params![
                     sku,
                     barcode,
@@ -2739,6 +2785,7 @@ fn product_upsert(
                     category,
                     unit,
                     input.price,
+                    input.wholesale_price,
                     input.cost,
                     input.stock,
                     input.min_stock,
@@ -2781,7 +2828,7 @@ fn product_delete(state: State<'_, AppState>, actor_id: i64, id: i64) -> Command
 
 fn get_product(conn: &Connection, id: i64) -> CommandResult<Product> {
     let mut product = conn.query_row(
-        "SELECT id, sku, barcode, name, category, unit, price, cost, stock, min_stock, tax_rate, active
+        "SELECT id, sku, barcode, name, category, unit, price, wholesale_price, cost, stock, min_stock, tax_rate, active
          FROM products WHERE id = ?1",
         params![id],
         map_product,
@@ -3654,7 +3701,18 @@ fn create_sale_with_conn(conn: &mut Connection, draft: SaleDraft) -> CommandResu
     if paid < total {
         return Err("Pago insuficiente".into());
     }
-    let change_due = round_money(paid - total);
+    let cash_paid: f64 = draft
+        .payments
+        .iter()
+        .filter(|payment| payment.method == "cash")
+        .map(|payment| payment.amount)
+        .sum();
+    let non_cash_paid = round_money(paid - cash_paid);
+    if non_cash_paid > total {
+        return Err("Tarjeta/credito excede total".into());
+    }
+    let cash_needed = round_money((total - non_cash_paid).max(0.0));
+    let change_due = round_money((cash_paid - cash_needed).max(0.0));
     let created_at = now_iso();
     let period = period_key(&created_at)?;
     let current_month_max: i64 = tx
@@ -3752,12 +3810,6 @@ fn create_sale_with_conn(conn: &mut Connection, draft: SaleDraft) -> CommandResu
         .map_err(|error| error.to_string())?;
     }
 
-    let cash_paid: f64 = draft
-        .payments
-        .iter()
-        .filter(|payment| payment.method == "cash")
-        .map(|payment| payment.amount)
-        .sum();
     tx.execute(
         "UPDATE cash_sessions
          SET sales_total = sales_total + ?1, expected_cash = expected_cash + ?2
@@ -4521,6 +4573,131 @@ fn shift_cut_text(conn: &Connection, shift_id: i64) -> CommandResult<String> {
     Ok(text)
 }
 
+fn daily_cut_summary_with_conn(
+    conn: &Connection,
+    date: Option<String>,
+) -> CommandResult<DailyCutSummary> {
+    let date = date
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| Utc::now().format("%Y-%m-%d").to_string());
+    let mut stmt = conn
+        .prepare(
+            "SELECT id
+             FROM shifts
+             WHERE status = 'closed'
+               AND closed_at IS NOT NULL
+               AND date(closed_at) = date(?1)
+             ORDER BY closed_at, id",
+        )
+        .map_err(|error| error.to_string())?;
+    let shift_ids = stmt
+        .query_map(params![date], |row| row.get::<_, i64>(0))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let mut cuts = Vec::new();
+    for shift_id in shift_ids {
+        cuts.push(calculate_shift_cut(conn, shift_id)?);
+    }
+    let total_tickets = cuts.iter().map(|cut| cut.total_tickets).sum();
+    let net_sales: f64 = cuts.iter().map(|cut| cut.net_sales).sum();
+    Ok(DailyCutSummary {
+        date,
+        cut_count: cuts.len() as i64,
+        total_tickets,
+        canceled_tickets: cuts.iter().map(|cut| cut.canceled_tickets).sum(),
+        gross_sales: round_money(cuts.iter().map(|cut| cut.gross_sales).sum()),
+        net_sales: round_money(net_sales),
+        tax: round_money(cuts.iter().map(|cut| cut.tax).sum()),
+        discount: round_money(cuts.iter().map(|cut| cut.discount).sum()),
+        cash_paid: round_money(cuts.iter().map(|cut| cut.cash_paid).sum()),
+        card_paid: round_money(cuts.iter().map(|cut| cut.card_paid).sum()),
+        transfer_paid: round_money(cuts.iter().map(|cut| cut.transfer_paid).sum()),
+        average_ticket: average_ticket(net_sales, total_tickets),
+        opening_cash: round_money(cuts.iter().map(|cut| cut.opening_cash).sum()),
+        expected_cash: round_money(cuts.iter().map(|cut| cut.expected_cash).sum()),
+        counted_cash: round_money(
+            cuts.iter()
+                .map(|cut| cut.counted_cash.or(cut.closing_cash).unwrap_or(0.0))
+                .sum(),
+        ),
+        cash_difference: round_money(
+            cuts.iter()
+                .map(|cut| cut.cash_difference.unwrap_or(0.0))
+                .sum(),
+        ),
+        cuts,
+    })
+}
+
+#[tauri::command]
+fn daily_cut_summary(
+    state: State<'_, AppState>,
+    actor_id: i64,
+    date: Option<String>,
+) -> CommandResult<DailyCutSummary> {
+    let conn = state.db.lock().map_err(|error| error.to_string())?;
+    require_active_user(&conn, actor_id)?;
+    daily_cut_summary_with_conn(&conn, date)
+}
+
+fn daily_cut_text(conn: &Connection, date: Option<String>) -> CommandResult<String> {
+    let summary = daily_cut_summary_with_conn(conn, date)?;
+    let store_name = ticket_setting(conn, "ticket_store_name", "RIM-POS")?;
+    let width = ticket_setting_i64(conn, "ticket_width", 32, 24, 48)? as usize;
+    let separator = ticket_separator(width);
+    let mut text = String::new();
+    text.push_str(&format!(
+        "{store_name}\nCORTE GENERAL DEL DIA\n{separator}\n"
+    ));
+    text.push_str(&format!("Fecha: {}\n", summary.date));
+    text.push_str(&format!("Turnos cerrados: {}\n", summary.cut_count));
+    text.push_str(&format!("Tickets: {}\n", summary.total_tickets));
+    text.push_str(&format!("Cancelados: {}\n", summary.canceled_tickets));
+    text.push_str(&format!("Ventas netas: ${:.2}\n", summary.net_sales));
+    text.push_str(&format!("Efectivo: ${:.2}\n", summary.cash_paid));
+    text.push_str(&format!("Tarjeta: ${:.2}\n", summary.card_paid));
+    text.push_str(&format!("Credito: ${:.2}\n", summary.transfer_paid));
+    text.push_str(&format!("Esperado: ${:.2}\n", summary.expected_cash));
+    text.push_str(&format!("Contado: ${:.2}\n", summary.counted_cash));
+    text.push_str(&format!(
+        "Diferencia: ${:.2}\n{separator}\n",
+        summary.cash_difference
+    ));
+    for cut in summary.cuts {
+        text.push_str(&format!(
+            "Corte #{} {} ${:.2} dif ${:.2}\n",
+            cut.shift_id,
+            cut.closed_by_name.unwrap_or_else(|| "sin cajero".into()),
+            cut.net_sales,
+            cut.cash_difference.unwrap_or(0.0)
+        ));
+    }
+    text.push_str(&format!("{separator}\n"));
+    Ok(text)
+}
+
+#[tauri::command]
+fn print_daily_cut(
+    state: State<'_, AppState>,
+    actor_id: i64,
+    date: Option<String>,
+) -> CommandResult<HardwareResult> {
+    let conn = state.db.lock().map_err(|error| error.to_string())?;
+    require_active_user(&conn, actor_id)?;
+    let printer = ticket_setting(&conn, "printer", "")?;
+    let text = daily_cut_text(&conn, date)?;
+    drop(conn);
+    let file = temp_hardware_file("rim-pos-daily-cut", "txt");
+    fs::write(&file, text).map_err(|error| error.to_string())?;
+    run_print_file(&printer, &file, false)?;
+    let _ = fs::remove_file(file);
+    Ok(HardwareResult {
+        ok: true,
+        message: "Corte general enviado a impresora".into(),
+    })
+}
+
 #[tauri::command]
 fn print_shift_cut(
     state: State<'_, AppState>,
@@ -4655,13 +4832,29 @@ fn calculate_shift_cut(conn: &Connection, shift_id: i64) -> CommandResult<ShiftC
         status,
         opened_at,
         closed_at,
+        opened_by_name,
+        closed_by_name,
         opening_cash,
         closing_cash,
         expected_cash,
-    ): (i64, String, String, Option<String>, f64, Option<f64>, f64) = conn
+    ): (
+        i64,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        f64,
+        Option<f64>,
+        f64,
+    ) = conn
         .query_row(
-            "SELECT cash_session_id, status, opened_at, closed_at, opening_cash, closing_cash, expected_cash
-             FROM shifts WHERE id = ?1",
+            "SELECT sh.cash_session_id, sh.status, sh.opened_at, sh.closed_at, opener.name, closer.name,
+                    sh.opening_cash, sh.closing_cash, sh.expected_cash
+             FROM shifts sh
+             LEFT JOIN users opener ON opener.id = sh.opened_by
+             LEFT JOIN users closer ON closer.id = sh.closed_by
+             WHERE sh.id = ?1",
             params![shift_id],
             |row| {
                 Ok((
@@ -4672,6 +4865,8 @@ fn calculate_shift_cut(conn: &Connection, shift_id: i64) -> CommandResult<ShiftC
                     row.get(4)?,
                     row.get(5)?,
                     row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
                 ))
             },
         )
@@ -4732,6 +4927,8 @@ fn calculate_shift_cut(conn: &Connection, shift_id: i64) -> CommandResult<ShiftC
         status,
         opened_at,
         closed_at,
+        opened_by_name,
+        closed_by_name,
         total_tickets,
         canceled_tickets,
         gross_sales: round_money(net_sales + discount),
@@ -4819,7 +5016,7 @@ fn dashboard_summary(state: State<'_, AppState>, actor_id: i64) -> CommandResult
 fn app_bootstrap(state: State<'_, AppState>, actor_id: i64) -> CommandResult<AppBootstrap> {
     let conn = state.db.lock().map_err(|error| error.to_string())?;
     let summary = dashboard_summary_with_conn(&conn, actor_id)?;
-    let products = product_search_with_conn(&conn, "", 40)?;
+    let products = product_search_with_conn(&conn, "", 40, 0)?;
     let held_tickets = held_ticket_list_with_conn(&conn)?;
     let tax_enabled = setting_bool(&conn, "tax_enabled", true)?;
     let tax_prices_include_tax = setting_bool(&conn, "tax_prices_include_tax", true)?;
@@ -4916,14 +5113,20 @@ fn report_product_sales(
     require_permission(&conn, actor_id, "reports")?;
     let mut stmt = conn
         .prepare(
-            "SELECT p.id, p.name, COALESCE(SUM(si.quantity), 0), COALESCE(SUM(si.line_total), 0)
+            "SELECT
+               p.id,
+               p.name,
+               p.category,
+               COALESCE(SUM(si.quantity), 0),
+               COALESCE(SUM(si.line_total), 0),
+               COALESCE(SUM(si.line_total - (p.cost * si.quantity)), 0)
              FROM sale_items si
              JOIN sales s ON s.id = si.sale_id
              JOIN products p ON p.id = si.product_id
              WHERE s.status = 'paid'
                AND (?2 IS NULL OR date(s.created_at) >= date(?2))
                AND (?3 IS NULL OR date(s.created_at) <= date(?3))
-             GROUP BY p.id, p.name
+             GROUP BY p.id, p.name, p.category
              ORDER BY SUM(si.line_total) DESC
              LIMIT ?1",
         )
@@ -4933,8 +5136,55 @@ fn report_product_sales(
             Ok(ProductSalesReport {
                 product_id: row.get(0)?,
                 product_name: row.get(1)?,
-                quantity: row.get(2)?,
-                total: row.get(3)?,
+                category: row.get(2)?,
+                quantity: row.get(3)?,
+                total: row.get(4)?,
+                gross_profit: row.get(5)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn report_tax_breakdown(
+    state: State<'_, AppState>,
+    actor_id: i64,
+    from_date: Option<String>,
+    to_date: Option<String>,
+) -> CommandResult<Vec<TaxBreakdown>> {
+    let conn = state.db.lock().map_err(|error| error.to_string())?;
+    require_permission(&conn, actor_id, "reports")?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT
+               si.tax_rate,
+               COALESCE(SUM(CASE
+                 WHEN si.tax_rate > 0 THEN si.line_total / (1 + si.tax_rate)
+                 ELSE si.line_total
+               END), 0) AS taxable_sales,
+               COALESCE(SUM(CASE
+                 WHEN si.tax_rate > 0 THEN si.line_total - (si.line_total / (1 + si.tax_rate))
+                 ELSE 0
+               END), 0) AS tax_collected,
+               COALESCE(SUM(si.line_total), 0) AS gross_sales
+             FROM sale_items si
+             JOIN sales s ON s.id = si.sale_id
+             WHERE s.status = 'paid'
+               AND (?1 IS NULL OR date(s.created_at) >= date(?1))
+               AND (?2 IS NULL OR date(s.created_at) <= date(?2))
+             GROUP BY si.tax_rate
+             ORDER BY si.tax_rate DESC",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map(params![from_date, to_date], |row| {
+            Ok(TaxBreakdown {
+                tax_rate: row.get(0)?,
+                taxable_sales: round_money(row.get(1)?),
+                tax_collected: round_money(row.get(2)?),
+                gross_sales: round_money(row.get(3)?),
             })
         })
         .map_err(|error| error.to_string())?;
@@ -4947,13 +5197,15 @@ fn report_movement_history(
     state: State<'_, AppState>,
     actor_id: i64,
     limit: Option<i64>,
+    from_date: Option<String>,
+    to_date: Option<String>,
 ) -> CommandResult<Vec<ReportMovement>> {
     let limit = limit.unwrap_or(160).clamp(20, 500);
     let conn = state.db.lock().map_err(|error| error.to_string())?;
     require_permission(&conn, actor_id, "reports")?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, kind, title, detail, amount, cash_paid, card_paid, transfer_paid, actor_name, cash_session_id, created_at
+            "SELECT id, kind, title, detail, amount, gross_profit, cash_paid, card_paid, transfer_paid, tax_total, card_terminal, actor_name, cash_session_id, created_at
              FROM (
                SELECT
                  'sale-' || s.id AS id,
@@ -4961,11 +5213,15 @@ fn report_movement_history(
                  CASE WHEN s.status = 'paid' THEN 'Venta ' || s.folio ELSE 'Cancelacion ' || s.folio END AS title,
                  'Efectivo ' || printf('%.2f', COALESCE(pay.cash_paid, 0)) ||
                    ' · Tarjeta ' || printf('%.2f', COALESCE(pay.card_paid, 0)) ||
+                   COALESCE(' · Terminal ' || pay.card_terminal, '') ||
                    ' · Crédito ' || printf('%.2f', COALESCE(pay.transfer_paid, 0)) AS detail,
                  CASE WHEN s.status = 'paid' THEN s.total ELSE -s.total END AS amount,
+                 CASE WHEN s.status = 'paid' THEN COALESCE(profit.gross_profit, 0) ELSE -COALESCE(profit.gross_profit, 0) END AS gross_profit,
                  COALESCE(pay.cash_paid, 0) AS cash_paid,
                  COALESCE(pay.card_paid, 0) AS card_paid,
                  COALESCE(pay.transfer_paid, 0) AS transfer_paid,
+                 s.tax AS tax_total,
+                 pay.card_terminal AS card_terminal,
                  u.name AS actor_name,
                  s.cash_session_id AS cash_session_id,
                  s.created_at AS created_at
@@ -4976,10 +5232,19 @@ fn report_movement_history(
                    sale_id,
                    SUM(CASE WHEN method = 'cash' THEN amount ELSE 0 END) AS cash_paid,
                    SUM(CASE WHEN method = 'card' THEN amount ELSE 0 END) AS card_paid,
-                   SUM(CASE WHEN method = 'transfer' THEN amount ELSE 0 END) AS transfer_paid
+                   SUM(CASE WHEN method = 'transfer' THEN amount ELSE 0 END) AS transfer_paid,
+                   MAX(CASE WHEN method = 'card' THEN reference ELSE NULL END) AS card_terminal
                  FROM payments
                  GROUP BY sale_id
                ) pay ON pay.sale_id = s.id
+               LEFT JOIN (
+                 SELECT
+                   si.sale_id,
+                   SUM(si.line_total - (p.cost * si.quantity)) AS gross_profit
+                 FROM sale_items si
+                 JOIN products p ON p.id = si.product_id
+                 GROUP BY si.sale_id
+               ) profit ON profit.sale_id = s.id
                UNION ALL
                SELECT
                  'purchase-' || pu.id,
@@ -4990,6 +5255,9 @@ fn report_movement_history(
                  0,
                  0,
                  0,
+                 0,
+                 0,
+                 NULL,
                  u.name,
                  NULL,
                  pu.created_at
@@ -5016,6 +5284,9 @@ fn report_movement_history(
                  0,
                  0,
                  0,
+                 0,
+                 0,
+                 NULL,
                  u.name,
                  m.session_id,
                  m.created_at
@@ -5031,6 +5302,9 @@ fn report_movement_history(
                  0,
                  0,
                  0,
+                 0,
+                 0,
+                 NULL,
                  NULL,
                  NULL,
                  im.created_at
@@ -5046,6 +5320,9 @@ fn report_movement_history(
                  0,
                  0,
                  0,
+                 0,
+                 0,
+                 NULL,
                  NULL,
                  NULL,
                  ccm.created_at
@@ -5061,6 +5338,9 @@ fn report_movement_history(
                  0,
                  0,
                  0,
+                 0,
+                 0,
+                 NULL,
                  u.name,
                  cs.id,
                  cs.opened_at
@@ -5076,6 +5356,9 @@ fn report_movement_history(
                  0,
                  0,
                  0,
+                 0,
+                 0,
+                 NULL,
                  u.name,
                  cs.id,
                  COALESCE(cs.closed_at, cs.opened_at)
@@ -5083,24 +5366,29 @@ fn report_movement_history(
                JOIN users u ON u.id = cs.opened_by
                WHERE cs.closed_at IS NOT NULL
              )
+             WHERE (?2 IS NULL OR date(created_at) >= date(?2))
+               AND (?3 IS NULL OR date(created_at) <= date(?3))
              ORDER BY created_at DESC
              LIMIT ?1",
         )
         .map_err(|error| error.to_string())?;
     let rows = stmt
-        .query_map(params![limit], |row| {
+        .query_map(params![limit, from_date, to_date], |row| {
             Ok(ReportMovement {
                 id: row.get(0)?,
                 kind: row.get(1)?,
                 title: row.get(2)?,
                 detail: row.get(3)?,
                 amount: row.get(4)?,
-                cash_paid: row.get(5)?,
-                card_paid: row.get(6)?,
-                transfer_paid: row.get(7)?,
-                actor_name: row.get(8)?,
-                cash_session_id: row.get(9)?,
-                created_at: row.get(10)?,
+                gross_profit: row.get(5)?,
+                cash_paid: row.get(6)?,
+                card_paid: row.get(7)?,
+                transfer_paid: row.get(8)?,
+                tax_total: row.get(9)?,
+                card_terminal: row.get(10)?,
+                actor_name: row.get(11)?,
+                cash_session_id: row.get(12)?,
+                created_at: row.get(13)?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -5588,8 +5876,8 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO products
-             (id, sku, barcode, name, category, unit, price, cost, stock, min_stock, tax_rate, active, search_text, created_at, updated_at)
-             VALUES (1, 'SKU-TEST', '750000000001', 'Producto test', 'Abarrotes', 'pieza', 20, 10, 5, 1, 0, 1, 'producto test', ?1, ?1)",
+             (id, sku, barcode, name, category, unit, price, wholesale_price, cost, stock, min_stock, tax_rate, active, search_text, created_at, updated_at)
+             VALUES (1, 'SKU-TEST', '750000000001', 'Producto test', 'Abarrotes', 'pieza', 20, NULL, 10, 5, 1, 0, 1, 'producto test', ?1, ?1)",
             params![now_iso()],
         )
         .unwrap();
@@ -5679,6 +5967,7 @@ mod tests {
                     category: "Abarrotes".into(),
                     unit: "pieza".into(),
                     price: 12.0,
+                    wholesale_price: None,
                     cost: 8.0,
                     stock: 3.0,
                     min_stock: 1.0,
@@ -5694,6 +5983,7 @@ mod tests {
                     category: "Abarrotes".into(),
                     unit: "pieza".into(),
                     price: -1.0,
+                    wholesale_price: None,
                     cost: 8.0,
                     stock: 3.0,
                     min_stock: 1.0,
@@ -5714,6 +6004,73 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn mixed_payment_change_comes_from_cash_only() {
+        let mut conn = flow_conn();
+        let session = open_cash_session_with_conn(&conn, 2, 100.0).unwrap();
+
+        let receipt = create_sale_with_conn(
+            &mut conn,
+            SaleDraft {
+                cashier_id: 2,
+                customer_id: None,
+                items: vec![SaleItemInput {
+                    product_id: 1,
+                    quantity: 2.0,
+                    unit_price: 20.0,
+                    discount: 0.0,
+                }],
+                payments: vec![
+                    PaymentInput {
+                        method: "card".into(),
+                        amount: 30.0,
+                        reference: Some("Terminal 1".into()),
+                    },
+                    PaymentInput {
+                        method: "cash".into(),
+                        amount: 20.0,
+                        reference: None,
+                    },
+                ],
+                notes: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(receipt.total, 40.0);
+        assert_eq!(receipt.paid, 50.0);
+        assert_eq!(receipt.change_due, 10.0);
+        let expected_cash: f64 = conn
+            .query_row(
+                "SELECT expected_cash FROM cash_sessions WHERE id = ?1",
+                params![session.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(expected_cash, 110.0);
+
+        let err = create_sale_with_conn(
+            &mut conn,
+            SaleDraft {
+                cashier_id: 2,
+                customer_id: None,
+                items: vec![SaleItemInput {
+                    product_id: 1,
+                    quantity: 1.0,
+                    unit_price: 20.0,
+                    discount: 0.0,
+                }],
+                payments: vec![PaymentInput {
+                    method: "card".into(),
+                    amount: 25.0,
+                    reference: Some("Terminal 1".into()),
+                }],
+                notes: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err, "Tarjeta/credito excede total");
     }
 
     #[test]
@@ -5899,6 +6256,8 @@ pub fn run() {
             shift_cut_z,
             shift_cut_history,
             print_shift_cut,
+            daily_cut_summary,
+            print_daily_cut,
             cash_movement_create,
             cash_movement_list,
             cash_count_create,
@@ -5907,6 +6266,7 @@ pub fn run() {
             app_bootstrap,
             report_summary,
             report_product_sales,
+            report_tax_breakdown,
             report_movement_history,
             monthly_sales_report,
             period_lock,

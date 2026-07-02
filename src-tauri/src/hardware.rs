@@ -5,7 +5,12 @@ use std::env;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Output};
+use std::thread;
+use std::time::{Duration, Instant};
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 type CommandResult<T> = Result<T, String>;
 
@@ -30,8 +35,58 @@ fn clean_device_text(value: &str) -> String {
         .collect()
 }
 
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+#[cfg_attr(not(windows), allow(unused_variables))]
+fn configure_command(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
+fn command_output(program: &str, args: &[&str], timeout_ms: u64) -> CommandResult<Output> {
+    let mut command = Command::new(program);
+    command.args(args);
+    configure_command(&mut command);
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("No se pudo ejecutar {program}: {error}"))?;
+    let started_at = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .map_err(|error| format!("{program} fallo al leer salida: {error}"));
+            }
+            Ok(None) => {
+                if started_at.elapsed() >= Duration::from_millis(timeout_ms) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("{program} tardo demasiado"));
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => return Err(format!("{program} fallo: {error}")),
+        }
+    }
+}
+
+fn powershell_args(command: &str) -> [&str; 6] {
+    [
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        command,
+    ]
+}
+
 fn command_lines(program: &str, args: &[&str]) -> Vec<String> {
-    let Ok(output) = Command::new(program).args(args).output() else {
+    let Ok(output) = command_output(program, args, 2500) else {
         return Vec::new();
     };
     if !output.status.success() {
@@ -95,7 +150,7 @@ fn detect_unix_printers(devices: &mut Vec<HardwareDevice>, seen: &mut HashSet<St
 
 fn detect_windows_printers(devices: &mut Vec<HardwareDevice>, seen: &mut HashSet<String>) {
     let command = "Get-Printer | ForEach-Object { \"$($_.Name)|$($_.DriverName)|$($_.PortName)\" }";
-    for line in command_lines("powershell", &["-NoProfile", "-Command", command]) {
+    for line in command_lines("powershell", &powershell_args(command)) {
         let parts: Vec<&str> = line.split('|').collect();
         let name = clean_device_text(parts.first().copied().unwrap_or(""));
         if name.is_empty() {
@@ -123,7 +178,7 @@ fn detect_serial_paths(devices: &mut Vec<HardwareDevice>, seen: &mut HashSet<Str
     {
         let command =
             "Get-CimInstance Win32_SerialPort | ForEach-Object { \"$($_.DeviceID)|$($_.Name)\" }";
-        for line in command_lines("powershell", &["-NoProfile", "-Command", command]) {
+        for line in command_lines("powershell", &powershell_args(command)) {
             let parts: Vec<&str> = line.split('|').collect();
             let id = clean_device_text(parts.first().copied().unwrap_or(""));
             if id.is_empty() {
@@ -249,11 +304,7 @@ pub fn run_print_file(printer: &str, file: &PathBuf, raw: bool) -> CommandResult
         let path = ps_single_quote(&file.to_string_lossy());
         let printer = ps_single_quote(&printer);
         let command = format!("Get-Content -Raw '{path}' | Out-Printer -Name '{printer}'");
-        let output = Command::new("powershell")
-            .arg("-NoProfile")
-            .arg("-Command")
-            .arg(command)
-            .output()
+        let output = command_output("powershell", &powershell_args(&command), 5000)
             .map_err(|error| format!("No se pudo imprimir: {error}"))?;
         if output.status.success() {
             return Ok(());
@@ -347,11 +398,7 @@ pub fn read_serial_scale(
                     if ([string]::IsNullOrWhiteSpace($text)) {{ try {{ $text = $p.ReadLine() }} catch {{ $text = '' }} }}; \
                     $text }} finally {{ if ($p.IsOpen) {{ $p.Close() }} }}"
         );
-        let output = Command::new("powershell")
-            .arg("-NoProfile")
-            .arg("-Command")
-            .arg(command)
-            .output()
+        let output = command_output("powershell", &powershell_args(&command), timeout_ms + 1500)
             .map_err(|error| format!("No se pudo leer bascula: {error}"))?;
         if !output.status.success() {
             return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());

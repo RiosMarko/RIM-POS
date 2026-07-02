@@ -1,5 +1,6 @@
 import type { ConfirmDraft } from "../../components/modals/CommonModals";
 import { lazy, Suspense } from "react";
+import type { ProductSearchOptions } from "../../lib/posApi";
 import type { ViewKey } from "../../navigation";
 import type { DashboardSummary, Product, UserSession } from "../../types";
 
@@ -38,17 +39,19 @@ export function AdminView({
   showToast,
   onTaxModeChange,
   requestConfirm,
+  requestView,
 }: {
   view: ViewKey;
   session: UserSession;
   products: Product[];
   summary: DashboardSummary | null;
   openCash: (openingCash?: number) => void;
-  refreshProducts: (query?: string) => Promise<void>;
+  refreshProducts: (query?: string, options?: ProductSearchOptions) => Promise<void>;
   refreshSummary: () => Promise<void>;
   showToast: (message: string) => void;
   onTaxModeChange: (mode: { enabled: boolean; pricesIncludeTax: boolean }) => void;
   requestConfirm: (draft: ConfirmDraft) => void;
+  requestView: (view: ViewKey) => void;
 }) {
   let content;
   if (view === "users") content = <UsersView showToast={showToast} requestConfirm={requestConfirm} />;

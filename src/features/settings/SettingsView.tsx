@@ -1,6 +1,7 @@
-import { Archive, Percent, Printer, Scale } from "lucide-react";
+import { Archive, CreditCard, Percent, Printer, Scale, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Setting } from "../../components/display/SummaryCards";
+import { loadCardTerminals, saveCardTerminals } from "../../lib/cardTerminals";
 import { selectNumericInput } from "../../lib/numberInput";
 import { getSetting, listHardwareDevices, openDrawer, printTicket, readScale, setSetting } from "../../lib/posApi";
 import type { HardwareDevice } from "../../types";
@@ -37,6 +38,8 @@ export function SettingsView({
   const [ticketCopies, setTicketCopies] = useState(1);
   const [ticketPreviewDraft, setTicketPreviewDraft] = useState("");
   const [ticketPreviewDirty, setTicketPreviewDirty] = useState(false);
+  const [cardTerminals, setCardTerminals] = useState<string[]>([]);
+  const [cardTerminalDraft, setCardTerminalDraft] = useState("");
   const [devices, setDevices] = useState<HardwareDevice[]>([]);
   const [detecting, setDetecting] = useState(false);
 
@@ -62,6 +65,7 @@ export function SettingsView({
   }, [drawer, printer, scale, showToast]);
 
   useEffect(() => {
+    setCardTerminals(loadCardTerminals());
     Promise.all([
       getSetting("printer"),
       getSetting("workstation_id"),
@@ -86,7 +90,6 @@ export function SettingsView({
       getSetting("ticket_start_lines"),
       getSetting("ticket_extra_lines"),
       getSetting("ticket_copies"),
-      listHardwareDevices(),
     ])
       .then(([
         nextPrinter,
@@ -112,16 +115,12 @@ export function SettingsView({
         nextTicketStartLines,
         nextTicketExtraLines,
         nextTicketCopies,
-        nextDevices,
       ]) => {
-        setDevices(nextDevices);
-        const defaultPrinter = nextDevices.find((device) => device.device_type === "printer" && device.is_default) ?? nextDevices.find((device) => device.device_type === "printer");
-        const defaultSerial = nextDevices.find((device) => device.device_type === "serial");
-        setPrinter(nextPrinter || defaultPrinter?.id || "mock-printer-80mm");
+        setPrinter(nextPrinter || "mock-printer-80mm");
         setWorkstationId(nextWorkstationId || "CAJA-1");
-        setScale(nextScale || defaultSerial?.id || "mock-scale-serial");
+        setScale(nextScale || "mock-scale-serial");
         setScaleBaudRate(Number(nextScaleBaudRate ?? 9600));
-        setDrawer(nextDrawer || defaultPrinter?.id || defaultSerial?.id || "mock-drawer-escpos");
+        setDrawer(nextDrawer || "mock-drawer-escpos");
         const enabled = nextTaxEnabled !== "false";
         setTaxEnabled(enabled);
         setTaxCountry(nextTaxCountry || "MX");
@@ -145,6 +144,24 @@ export function SettingsView({
       })
       .catch((error) => showToast(String(error)));
   }, [onTaxModeChange, showToast]);
+
+  const addCardTerminal = () => {
+    const name = cardTerminalDraft.trim();
+    if (name.length < 2) {
+      showToast("Nombre de terminal requerido");
+      return;
+    }
+    const next = saveCardTerminals([...cardTerminals, name]);
+    setCardTerminals(next);
+    setCardTerminalDraft("");
+    showToast("Terminal agregada");
+  };
+
+  const removeCardTerminal = (terminal: string) => {
+    const next = saveCardTerminals(cardTerminals.filter((item) => item !== terminal));
+    setCardTerminals(next);
+    showToast("Terminal eliminada");
+  };
 
   const clampTicketLines = (value: number) => Math.max(0, Math.min(8, Math.floor(value)));
 
@@ -483,6 +500,47 @@ export function SettingsView({
             </div>
           </section>
 
+          <section className="settings-section">
+            <div className="settings-section-title">
+              <div>
+                <h2>Terminales</h2>
+                <p>Terminales bancarias para pagos con tarjeta.</p>
+              </div>
+            </div>
+            <div className="terminal-config">
+              <label>
+                Nombre de terminal
+                <input
+                  value={cardTerminalDraft}
+                  onChange={(event) => setCardTerminalDraft(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      addCardTerminal();
+                    }
+                  }}
+                  placeholder="Ej. Clip mostrador"
+                />
+              </label>
+              <button className="primary-button" type="button" onClick={addCardTerminal}>Agregar terminal</button>
+            </div>
+            <div className="terminal-list">
+              {cardTerminals.length === 0 ? (
+                <div className="muted-note">Sin terminales agregadas.</div>
+              ) : cardTerminals.map((terminal) => (
+                <div className="terminal-row" key={terminal}>
+                  <div>
+                    <strong>{terminal}</strong>
+                    <span>Disponible en Caja al pagar con tarjeta</span>
+                  </div>
+                  <button className="icon-button danger" type="button" aria-label={`Eliminar ${terminal}`} onClick={() => removeCardTerminal(terminal)}>
+                    <Trash2 size={16} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </section>
+
         </div>
 
         <aside className="settings-side">
@@ -491,6 +549,7 @@ export function SettingsView({
             <Setting icon={Printer} label="Impresora ticket" value={selectedDeviceName(printer)} />
             <Setting icon={Scale} label="Bascula" value={selectedDeviceName(scale)} />
             <Setting icon={Archive} label="Cajon" value={selectedDeviceName(drawer)} />
+            <Setting icon={CreditCard} label="Terminales" value={`${cardTerminals.length}`} />
             <Setting icon={Percent} label="Impuestos" value={taxEnabled ? `${Math.round(taxDefaultRate * 100)}%, ${taxPricesIncludeTax ? "incluidos" : "sumados"}` : "Desactivados"} />
           </div>
           <div className="device-list">

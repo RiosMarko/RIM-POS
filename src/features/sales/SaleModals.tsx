@@ -4,18 +4,18 @@ import { money } from "../../lib/money";
 import type { ActiveSaleDraft, HeldTicket } from "../../types";
 
 export const functionKeys = [
-  { key: "F1", label: "Ticket" },
-  { key: "F2", label: "No ticket" },
-  { key: "F3", label: "Productos", compactLabel: true },
-  { key: "F4", label: "Inventario", compactLabel: true },
-  { key: "F5", label: "Cliente" },
-  { key: "F6", label: "Dejar abierto" },
-  { key: "F7", label: "Quitar" },
-  { key: "F8", label: "Gasto" },
-  { key: "F9", label: "Pago" },
-  { key: "F10", label: "Cajon" },
-  { key: "F11", label: "Corte", compactLabel: true },
-  { key: "F12", label: "Admin" },
+  { key: "F1", label: "Ticket", title: "Cobrar e imprimir ticket" },
+  { key: "F2", label: "No ticket", title: "Cobrar sin imprimir ticket" },
+  { key: "F3", label: "Productos", compactLabel: true, title: "Abrir Productos" },
+  { key: "F4", label: "Inventario", compactLabel: true, title: "Abrir Inventario" },
+  { key: "F5", label: "Cliente", title: "Abrir Clientes" },
+  { key: "F6", label: "Dejar abierto", title: "Guardar venta como ticket abierto" },
+  { key: "F7", label: "Quitar", title: "Quitar producto seleccionado" },
+  { key: "F8", label: "Gasto", title: "Registrar gasto o salida de caja" },
+  { key: "F9", label: "Pago", title: "Ir a captura de pago" },
+  { key: "F10", label: "Cajon", title: "Abrir cajon y registrar apertura" },
+  { key: "F11", label: "Mayoreo", compactLabel: true, title: "Aplicar precio de mayoreo" },
+  { key: "F12", label: "Admin", title: "Abrir Configuracion" },
 ];
 
 export function ShortcutHelp({ onClose }: { onClose: () => void }) {

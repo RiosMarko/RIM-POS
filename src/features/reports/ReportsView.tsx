@@ -6,6 +6,8 @@ import {
   CreditCard as CreditCardIcon,
   FileText,
   PackageCheck,
+  Percent,
+  ReceiptText,
   Search,
   ShoppingCart,
   TrendingDown,
@@ -16,11 +18,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import { downloadCsv } from "../../lib/csv";
 import { money } from "../../lib/money";
-import { getMonthlySalesReport, getProductSalesReport, listReportMovements } from "../../lib/posApi";
-import type { MonthlySalesReport, ProductSalesReport, ReportMovement } from "../../types";
+import { getMonthlySalesReport, getProductSalesReport, getTaxBreakdown, listReportMovements } from "../../lib/posApi";
+import type { MonthlySalesReport, ProductSalesReport, ReportMovement, TaxBreakdown } from "../../types";
 
 type ReportTab = "today" | "movements" | "products" | "cuts" | "monthly";
-type DatePreset = "today" | "week" | "month" | "all";
+type DatePreset = "week" | "month" | "lastMonth" | "year" | "all";
 
 const tabs: Array<{ key: ReportTab; label: string }> = [
   { key: "today", label: "Hoy" },
@@ -31,9 +33,10 @@ const tabs: Array<{ key: ReportTab; label: string }> = [
 ];
 
 const presetLabels: Array<{ key: DatePreset; label: string }> = [
-  { key: "today", label: "Hoy" },
-  { key: "week", label: "Semana" },
-  { key: "month", label: "Mes" },
+  { key: "week", label: "Semana Actual" },
+  { key: "month", label: "Mes Actual" },
+  { key: "lastMonth", label: "Mes Anterior" },
+  { key: "year", label: "Año actual" },
   { key: "all", label: "Todo" },
 ];
 
@@ -61,8 +64,21 @@ function endOfMonth(date: Date) {
   return new Date(date.getFullYear(), date.getMonth() + 1, 0);
 }
 
+function monthRange(monthKey: string) {
+  const [year, month] = monthKey.split("-").map(Number);
+  if (!year || !month) return null;
+  const start = new Date(year, month - 1, 1);
+  return { from: dateKey(start), to: dateKey(endOfMonth(start)) };
+}
+
 function shortDateLabel(date: Date) {
   return date.toLocaleDateString("es-MX", { day: "2-digit", month: "2-digit" });
+}
+
+function reportDateLabel(value: string) {
+  const date = parseDateKey(value);
+  if (!date) return "Inicio";
+  return date.toLocaleDateString("es-MX", { day: "2-digit", month: "short", year: "numeric" }).replace(".", "").toUpperCase();
 }
 
 function movementTone(movement: ReportMovement) {
@@ -114,25 +130,31 @@ function ReportStat({
 
 export function ReportsView({ showToast }: { showToast: (message: string) => void }) {
   const todayKey = dateKey(new Date());
+  const monthStartKey = dateKey(new Date(new Date().getFullYear(), new Date().getMonth(), 1));
   const [products, setProducts] = useState<ProductSalesReport[]>([]);
   const [movements, setMovements] = useState<ReportMovement[]>([]);
   const [monthly, setMonthly] = useState<MonthlySalesReport[]>([]);
+  const [taxBreakdown, setTaxBreakdown] = useState<TaxBreakdown[]>([]);
   const [activeTab, setActiveTab] = useState<ReportTab>("today");
-  const [activePreset, setActivePreset] = useState<DatePreset | null>("today");
+  const [activePreset, setActivePreset] = useState<DatePreset | null>("month");
   const [filterKind, setFilterKind] = useState<"all" | ReportMovement["kind"]>("all");
   const [filterText, setFilterText] = useState("");
-  const [fromDate, setFromDate] = useState(todayKey);
+  const [fromDate, setFromDate] = useState(monthStartKey);
   const [toDate, setToDate] = useState(todayKey);
+  const [selectedMonth, setSelectedMonth] = useState(todayKey.slice(0, 7));
 
   const refresh = useCallback(async () => {
-    const [nextProducts, nextMovements, nextMonthly] = await Promise.all([
-      getProductSalesReport({ fromDate: fromDate || undefined, toDate: toDate || undefined }),
-      listReportMovements(),
+    const range = { fromDate: fromDate || undefined, toDate: toDate || undefined };
+    const [nextProducts, nextMovements, nextMonthly, nextTaxBreakdown] = await Promise.all([
+      getProductSalesReport(range),
+      listReportMovements(range),
       getMonthlySalesReport(),
+      getTaxBreakdown(range),
     ]);
     setProducts(nextProducts);
     setMovements(nextMovements);
     setMonthly(nextMonthly);
+    setTaxBreakdown(nextTaxBreakdown);
   }, [fromDate, toDate]);
 
   useEffect(() => {
@@ -142,15 +164,10 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
   const applyPreset = (preset: DatePreset) => {
     setActivePreset(preset);
     const now = new Date();
-    if (preset === "today") {
-      const today = dateKey(now);
-      setFromDate(today);
-      setToDate(today);
-      return;
-    }
     if (preset === "week") {
       const start = new Date(now);
-      start.setDate(now.getDate() - 6);
+      const day = now.getDay() || 7;
+      start.setDate(now.getDate() - day + 1);
       setFromDate(dateKey(start));
       setToDate(dateKey(now));
       return;
@@ -160,10 +177,35 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
       const end = endOfMonth(now);
       setFromDate(dateKey(start));
       setToDate(dateKey(end));
+      setSelectedMonth(dateKey(start).slice(0, 7));
+      return;
+    }
+    if (preset === "lastMonth") {
+      const start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const end = endOfMonth(start);
+      setFromDate(dateKey(start));
+      setToDate(dateKey(end));
+      setSelectedMonth(dateKey(start).slice(0, 7));
+      return;
+    }
+    if (preset === "year") {
+      const start = new Date(now.getFullYear(), 0, 1);
+      const end = new Date(now.getFullYear(), 11, 31);
+      setFromDate(dateKey(start));
+      setToDate(dateKey(end));
       return;
     }
     setFromDate("");
     setToDate("");
+  };
+
+  const applyMonth = (monthKey: string) => {
+    setSelectedMonth(monthKey);
+    const range = monthRange(monthKey);
+    if (!range) return;
+    setActivePreset(null);
+    setFromDate(range.from);
+    setToDate(range.to);
   };
 
   const periodLabel = useMemo(() => {
@@ -172,6 +214,9 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
     if (fromDate || toDate) return `${fromDate || "Inicio"} - ${toDate || "Hoy"}`;
     return "Todo";
   }, [activePreset, fromDate, toDate]);
+  const reportTitle = useMemo(() => (
+    `Resumen de ventas del ${reportDateLabel(fromDate)} al ${reportDateLabel(toDate || todayKey)}`
+  ), [fromDate, todayKey, toDate]);
 
   const normalizedFilterText = useMemo(() => filterText.trim().toLowerCase(), [filterText]);
   const periodMovements = useMemo(() => movements.filter((movement) => {
@@ -195,10 +240,40 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
   const expensesTotal = useMemo(() => expenseMovements.reduce((sum, movement) => sum + Math.abs(movement.amount), 0), [expenseMovements]);
   const netTotal = salesTotal - expensesTotal;
   const ticketCount = saleMovements.length;
+  const averageTicket = ticketCount > 0 ? salesTotal / ticketCount : 0;
+  const grossProfit = useMemo(() => saleMovements.reduce((sum, movement) => sum + (movement.gross_profit ?? 0), 0), [saleMovements]);
+  const marginPercent = salesTotal > 0 ? (grossProfit / salesTotal) * 100 : 0;
+  const taxTotal = useMemo(() => saleMovements.reduce((sum, movement) => sum + (movement.tax_total ?? 0), 0), [saleMovements]);
   const filteredTotal = useMemo(
     () => filteredMovements.reduce((sum, movement) => sum + movement.amount, 0),
     [filteredMovements],
   );
+
+  const departmentSales = useMemo(() => {
+    const totalsByDepartment = new Map<string, { total: number; profit: number; quantity: number }>();
+    products.forEach((product) => {
+      const key = product.category || "- Sin Departamento -";
+      const current = totalsByDepartment.get(key) ?? { total: 0, profit: 0, quantity: 0 };
+      current.total += product.total;
+      current.profit += product.gross_profit ?? 0;
+      current.quantity += product.quantity;
+      totalsByDepartment.set(key, current);
+    });
+    return Array.from(totalsByDepartment, ([department, value]) => ({ department, ...value }))
+      .sort((left, right) => right.total - left.total);
+  }, [products]);
+
+  const terminalSales = useMemo(() => {
+    const totalsByTerminal = new Map<string, number>();
+    saleMovements.forEach((movement) => {
+      const amount = movement.card_paid ?? 0;
+      if (amount <= 0) return;
+      const key = movement.card_terminal?.trim() || "Sin terminal";
+      totalsByTerminal.set(key, (totalsByTerminal.get(key) ?? 0) + amount);
+    });
+    return Array.from(totalsByTerminal, ([terminal, total]) => ({ terminal, total }))
+      .sort((left, right) => right.total - left.total);
+  }, [saleMovements]);
 
   const dailySales = useMemo(() => {
     const explicitStart = parseDateKey(fromDate);
@@ -227,15 +302,23 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
           ? bucketStart.toLocaleDateString("es-MX", { weekday: "short" })
           : `${shortDateLabel(bucketStart)}-${shortDateLabel(cappedEnd)}`,
         total: 0,
+        profit: 0,
       };
     });
     saleMovements.forEach((movement) => {
       const day = movement.created_at.slice(0, 10);
       const bucket = buckets.find((item) => day >= item.startKey && day <= item.endKey);
-      if (bucket) bucket.total += movement.amount;
+      if (bucket) {
+        bucket.total += movement.amount;
+        bucket.profit += movement.gross_profit ?? 0;
+      }
     });
-    const max = Math.max(1, ...buckets.map((day) => day.total));
-    return buckets.map((day) => ({ ...day, percent: Math.round((day.total / max) * 100) }));
+    const max = Math.max(1, ...buckets.flatMap((day) => [day.total, day.profit]));
+    return buckets.map((day) => ({
+      ...day,
+      percent: Math.round((day.total / max) * 100),
+      profitPercent: Math.round((day.profit / max) * 100),
+    }));
   }, [activePreset, fromDate, saleMovements, toDate]);
 
   const paymentSummary = [
@@ -259,7 +342,7 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
 
   const exportReport = () => {
     downloadCsv(`reporte-rim-pos-${new Date().toISOString().slice(0, 10)}.csv`, [
-      ["fecha", "tipo", "movimiento", "detalle", "caja", "usuario", "importe"],
+      ["fecha", "tipo", "movimiento", "detalle", "caja", "usuario", "importe", "ganancia", "impuestos", "terminal"],
       ...filteredMovements.map((movement) => [
         movement.created_at,
         movement.kind,
@@ -268,6 +351,9 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
         movement.cash_session_id ?? "",
         movement.actor_name ?? "Sistema",
         movement.amount,
+        movement.gross_profit ?? 0,
+        movement.tax_total ?? 0,
+        movement.card_terminal ?? "",
       ]),
     ]);
     showToast("Reporte exportado");
@@ -277,8 +363,8 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
     <section className="admin-panel compact report-module">
       <div className="report-hero">
         <div>
-          <h2>Reportes</h2>
-          <p>Ventas, gastos, caja y productos en una vista mas facil de leer.</p>
+          <h2>{reportTitle}</h2>
+          <p>Ventas, ganancia, pagos, departamentos, impuestos y terminales.</p>
         </div>
         <button className="primary-button" type="button" onClick={exportReport}>
           Exportar CSV
@@ -286,10 +372,12 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
       </div>
 
       <div className="report-stat-grid">
-        <ReportStat icon={CircleDollarSign} label="Vendido periodo" value={money(salesTotal)} tone="success" />
+        <ReportStat icon={CircleDollarSign} label="Ventas Totales" value={money(salesTotal)} tone="success" />
+        <ReportStat icon={FileText} label="Numero de Ventas" value={String(ticketCount)} />
+        <ReportStat icon={ReceiptText} label="Venta Promedio" value={money(averageTicket)} />
+        <ReportStat icon={TrendingUp} label="Ganancia" value={money(grossProfit)} tone={grossProfit >= 0 ? "info" : "danger"} />
+        <ReportStat icon={Percent} label="Margen promedio" value={`${marginPercent.toFixed(2)}%`} />
         <ReportStat icon={TrendingDown} label="Gastos periodo" value={money(expensesTotal)} tone="danger" />
-        <ReportStat icon={TrendingUp} label="Neto periodo" value={money(netTotal)} tone={netTotal >= 0 ? "info" : "danger"} />
-        <ReportStat icon={FileText} label="Tickets" value={String(ticketCount)} />
         <ReportStat icon={Banknote} label="Efectivo" value={money(paymentSummary[0].value)} tone="warning" />
         <ReportStat icon={CreditCardIcon} label="Tarjeta" value={money(paymentSummary[1].value)} />
       </div>
@@ -316,7 +404,14 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
               {preset.label}
             </button>
           ))}
+          <button className={activePreset === null ? "active" : undefined} type="button" onClick={() => setActivePreset(null)}>
+            Periodo...
+          </button>
         </div>
+        <label>
+          Mes
+          <input type="month" value={selectedMonth} onChange={(event) => applyMonth(event.target.value)} />
+        </label>
         <label>
           Desde
           <input type="date" value={fromDate} onChange={(event) => {
@@ -362,8 +457,12 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
             <div className="report-dashboard">
               <div className="report-panel">
                 <div className="report-panel-title">
-                  <h3>Ventas del periodo</h3>
+                  <h3>Ventas y ganancia</h3>
                   <span>{periodLabel}</span>
+                </div>
+                <div className="chart-legend">
+                  <span><i className="legend-sales" />Ventas</span>
+                  <span><i className="legend-profit" />Ganancia</span>
                 </div>
                 <div
                   className="sales-bars"
@@ -373,7 +472,10 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
                   {dailySales.map((day) => (
                     <div className="sales-bar" key={day.key}>
                       <strong>{money(day.total)}</strong>
-                      <div><span style={{ height: `${Math.max(4, day.percent)}%` }} /></div>
+                      <div>
+                        <span className="sales-bar-total" style={{ height: `${Math.max(4, day.percent)}%` }} />
+                        <span className="sales-bar-profit" style={{ height: `${Math.max(3, day.profitPercent)}%` }} />
+                      </div>
                       <small>{day.label}</small>
                     </div>
                   ))}
@@ -398,6 +500,86 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
                   ))}
                 </div>
               </div>
+              <div className="report-panel report-list-panel">
+                <div className="report-panel-title">
+                  <h3>Ventas por dia</h3>
+                  <span>{periodLabel}</span>
+                </div>
+                {dailySales.length === 0 ? (
+                  <div className="table-empty">Sin ventas diarias</div>
+                ) : dailySales.map((day) => (
+                  <div className="report-breakdown-row" key={`day-${day.key}`}>
+                    <div>
+                      <strong>{day.label}</strong>
+                      <span>Ganancia {money(day.profit)}</span>
+                    </div>
+                    <strong>{money(day.total)}</strong>
+                  </div>
+                ))}
+              </div>
+              <div className="report-panel report-list-panel">
+                <div className="report-panel-title">
+                  <h3>Ventas por Departamento</h3>
+                  <span>{money(salesTotal)}</span>
+                </div>
+                {departmentSales.length === 0 ? (
+                  <div className="table-empty">Sin ventas por departamento</div>
+                ) : departmentSales.slice(0, 8).map((department) => (
+                  <div className="report-breakdown-row" key={department.department}>
+                    <div>
+                      <strong>{department.department}</strong>
+                      <span>{department.quantity.toFixed(3)} piezas · ganancia {money(department.profit)}</span>
+                    </div>
+                    <strong>{money(department.total)}</strong>
+                  </div>
+                ))}
+              </div>
+              <div className="report-panel report-list-panel">
+                <div className="report-panel-title">
+                  <h3>Terminales usadas</h3>
+                  <span>Tarjeta</span>
+                </div>
+                {terminalSales.length === 0 ? (
+                  <div className="table-empty">Sin pagos con terminal</div>
+                ) : terminalSales.map((terminal) => (
+                  <div className="report-breakdown-row" key={terminal.terminal}>
+                    <div>
+                      <strong>{terminal.terminal}</strong>
+                      <span>Pagos con tarjeta</span>
+                    </div>
+                    <strong>{money(terminal.total)}</strong>
+                  </div>
+                ))}
+              </div>
+              <div className="report-panel report-list-panel">
+                <div className="report-panel-title">
+                  <h3>Impuestos</h3>
+                  <span>{periodLabel}</span>
+                </div>
+                <div className="tax-summary-grid">
+                  <div>
+                    <span>Impuestos cobrados</span>
+                    <strong>{money(taxTotal)}</strong>
+                  </div>
+                  <div>
+                    <span>Ventas gravadas</span>
+                    <strong>{money(Math.max(0, salesTotal - taxTotal))}</strong>
+                  </div>
+                </div>
+                <div className="tax-breakdown-list">
+                  {taxBreakdown.length === 0 ? (
+                    <div className="muted-note">Sin desglose fiscal</div>
+                  ) : taxBreakdown.map((tax) => (
+                    <div className="report-breakdown-row" key={tax.tax_rate}>
+                      <div>
+                        <strong>{tax.tax_rate > 0 ? `IVA/IEPS ${(tax.tax_rate * 100).toFixed(2)}%` : "Tasa 0%"}</strong>
+                        <span>Ventas gravadas {money(tax.taxable_sales)}</span>
+                      </div>
+                      <strong>{money(tax.tax_collected)}</strong>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
           )}
 
@@ -413,7 +595,7 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
                 <div className="product-report-row" key={product.product_id}>
                   <div>
                     <strong>{product.product_name}</strong>
-                    <span>{product.quantity} piezas</span>
+                    <span>{product.category || "- Sin Departamento -"} · {product.quantity.toFixed(3)} piezas · ganancia {money(product.gross_profit ?? 0)}</span>
                   </div>
                   <strong>{money(product.total)}</strong>
                 </div>
@@ -462,6 +644,7 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
                         {movement.cash_session_id ? `Caja ${movement.cash_session_id}` : "General"}
                         {" · "}
                         {movement.actor_name || "Sistema"}
+                        {movement.card_terminal ? ` · Terminal ${movement.card_terminal}` : ""}
                       </small>
                     </div>
                     <span className="movement-kind">{movementLabel(movement.kind)}</span>
@@ -477,7 +660,19 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
           <div className="report-side-card net-card">
             <span>Periodo filtrado</span>
             <strong>{money(netTotal)}</strong>
-            <small>Ventas {money(salesTotal)} menos gastos {money(expensesTotal)}</small>
+            <small>Ventas {money(salesTotal)} · ganancia {money(grossProfit)} · impuestos {money(taxTotal)}</small>
+          </div>
+
+          <div className="report-side-card">
+            <h3>Departamentos</h3>
+            {departmentSales.length === 0 ? (
+              <div className="muted-note">Sin departamentos en rango</div>
+            ) : departmentSales.slice(0, 5).map((department) => (
+              <div className="side-mini-row" key={department.department}>
+                <span>{department.department}</span>
+                <strong>{money(department.total)}</strong>
+              </div>
+            ))}
           </div>
 
           <div className="report-side-card">
@@ -500,6 +695,18 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
               <div className="side-mini-row" key={product.product_id}>
                 <span>{product.product_name}</span>
                 <strong>{money(product.total)}</strong>
+              </div>
+            ))}
+          </div>
+
+          <div className="report-side-card">
+            <h3>Terminales</h3>
+            {terminalSales.length === 0 ? (
+              <div className="muted-note">Sin pagos con tarjeta</div>
+            ) : terminalSales.slice(0, 5).map((terminal) => (
+              <div className="side-mini-row" key={terminal.terminal}>
+                <span>{terminal.terminal}</span>
+                <strong>{money(terminal.total)}</strong>
               </div>
             ))}
           </div>

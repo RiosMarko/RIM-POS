@@ -7,6 +7,7 @@ export type Product = {
   category: string;
   unit: string;
   price: number;
+  wholesale_price?: number | null;
   cost: number;
   stock: number;
   min_stock: number;
@@ -115,6 +116,8 @@ export type ShiftCutSnapshot = {
   status: string;
   opened_at: string;
   closed_at?: string | null;
+  opened_by_name?: string | null;
+  closed_by_name?: string | null;
   total_tickets: number;
   canceled_tickets: number;
   gross_sales: number;
@@ -131,6 +134,26 @@ export type ShiftCutSnapshot = {
   counted_cash?: number | null;
   cash_difference?: number | null;
   difference_reason?: string | null;
+};
+
+export type DailyCutSummary = {
+  date: string;
+  cut_count: number;
+  total_tickets: number;
+  canceled_tickets: number;
+  gross_sales: number;
+  net_sales: number;
+  tax: number;
+  discount: number;
+  cash_paid: number;
+  card_paid: number;
+  transfer_paid: number;
+  average_ticket: number;
+  opening_cash: number;
+  expected_cash: number;
+  counted_cash: number;
+  cash_difference: number;
+  cuts: ShiftCutSnapshot[];
 };
 
 export type MonthlySalesReport = {
@@ -242,8 +265,17 @@ export type ReportSummary = {
 export type ProductSalesReport = {
   product_id: number;
   product_name: string;
+  category: string;
   quantity: number;
   total: number;
+  gross_profit: number;
+};
+
+export type TaxBreakdown = {
+  tax_rate: number;
+  taxable_sales: number;
+  tax_collected: number;
+  gross_sales: number;
 };
 
 export type ReportMovement = {
@@ -252,9 +284,12 @@ export type ReportMovement = {
   title: string;
   detail: string;
   amount: number;
+  gross_profit?: number;
   cash_paid?: number;
   card_paid?: number;
   transfer_paid?: number;
+  tax_total?: number;
+  card_terminal?: string | null;
   actor_name?: string | null;
   cash_session_id?: number | null;
   created_at: string;

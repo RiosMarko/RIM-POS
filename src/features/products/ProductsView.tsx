@@ -1,10 +1,12 @@
 import { AlertTriangle, CheckCircle2, PackagePlus, Search, Trash2 } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ConfirmDraft } from "../../components/modals/CommonModals";
-import { downloadCsv, parseCsvLine } from "../../lib/csv";
+import { parseCsvLine } from "../../lib/csv";
 import { money } from "../../lib/money";
 import { selectNumericInput } from "../../lib/numberInput";
 import { bulkImportProducts, deleteProduct, getSetting, listTaxes, upsertProduct } from "../../lib/posApi";
+import type { ProductSearchOptions } from "../../lib/posApi";
+import { downloadXlsx, eleventaRowsFromProducts, parseEleventaCatalogXlsx } from "../../lib/xlsx";
 import type { Product, ProductImportIssue, ProductImportResult, ProductImportRow, TaxOption } from "../../types";
 
 const emptyProductForm = {
@@ -14,6 +16,7 @@ const emptyProductForm = {
   category: "Abarrotes",
   unit: "pieza",
   price: 0,
+  wholesale_price: null as number | null,
   cost: 0,
   stock: 0,
   min_stock: 0,
@@ -30,7 +33,18 @@ const fallbackTaxOptions: TaxOption[] = [
   { id: 5, name: "IEPS 26.5%", rate: 0.265, type: "IEPS", country: "MX", is_active: true },
 ];
 
+const PRODUCT_PAGE_SIZE = 50;
+const PRODUCT_LOAD_MORE_SIZE = 100;
+const PRODUCT_VIEW_ALL_LIMIT = 50_000;
+
 const normalizeBarcode = (value: string) => value.replace(/[^0-9A-Za-z]/g, "").trim();
+
+const emptyBulkEdit = {
+  category: "",
+  unit: "",
+  updateTaxes: false,
+  tax_ids: [] as number[],
+};
 
 type ImportPreview = {
   fileName: string;
@@ -57,7 +71,7 @@ export function ProductsView({
   requestConfirm,
 }: {
   products: Product[];
-  refreshProducts: (query?: string) => Promise<void>;
+  refreshProducts: (query?: string, options?: ProductSearchOptions) => Promise<void>;
   showToast: (message: string) => void;
   requestConfirm: (draft: ConfirmDraft) => void;
 }) {
@@ -69,10 +83,22 @@ export function ProductsView({
   const [taxOptions, setTaxOptions] = useState<TaxOption[]>([]);
   const [busy, setBusy] = useState(false);
   const [catalogQuery, setCatalogQuery] = useState("");
+  const [catalogLimit, setCatalogLimit] = useState(PRODUCT_PAGE_SIZE);
+  const [selectedProductIds, setSelectedProductIds] = useState<Set<number>>(new Set());
+  const [bulkEdit, setBulkEdit] = useState(emptyBulkEdit);
   const [editorOpen, setEditorOpen] = useState(false);
   const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
   const [lastImportResult, setLastImportResult] = useState<ProductImportResult | null>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
+  const pageProducts = useMemo(() => products.slice(0, catalogLimit), [catalogLimit, products]);
+  const catalogPageEnd = pageProducts.length;
+  const hasMoreProducts = products.length > catalogLimit;
+  const selectedProducts = useMemo(() => pageProducts.filter((product) => selectedProductIds.has(product.id)), [pageProducts, selectedProductIds]);
+  const allPageSelected = pageProducts.length > 0 && pageProducts.every((product) => selectedProductIds.has(product.id));
+
+  const loadCatalog = useCallback(async (query: string, limit = catalogLimit) => {
+    await refreshProducts(query, { limit: limit + 1, offset: 0 });
+  }, [catalogLimit, refreshProducts]);
 
   const activeTaxOptions = useMemo(() => taxOptions.length ? taxOptions : fallbackTaxOptions, [taxOptions]);
   const formTaxRate = useMemo(() => form.tax_ids.reduce((sum, taxId) => {
@@ -137,14 +163,21 @@ export function ProductsView({
       .catch((error) => showToast(String(error)));
   }, [showToast]);
 
+  useEffect(() => {
+    const visibleIds = new Set(pageProducts.map((product) => product.id));
+    setSelectedProductIds((current) => new Set(Array.from(current).filter((id) => visibleIds.has(id))));
+  }, [pageProducts]);
+
   const save = async (event: FormEvent) => {
     event.preventDefault();
     setBusy(true);
     try {
-      await upsertProduct({ ...form, tax_ids: taxEnabled ? form.tax_ids : [], tax_rate: taxEnabled ? formTaxRate : 0 });
+      const barcode = normalizeBarcode(form.barcode);
+      await upsertProduct({ ...form, sku: barcode, barcode, tax_ids: taxEnabled ? form.tax_ids : [], tax_rate: taxEnabled ? formTaxRate : 0 });
       setForm(newProductForm());
       setEditorOpen(false);
-      await refreshProducts("");
+      setCatalogLimit(PRODUCT_PAGE_SIZE);
+      await loadCatalog("", PRODUCT_PAGE_SIZE);
       showToast("Producto guardado");
     } catch (error) {
       showToast(String(error));
@@ -162,7 +195,8 @@ export function ProductsView({
       onConfirm: async () => {
         try {
           await deleteProduct(product.id);
-          await refreshProducts("");
+          setCatalogLimit(PRODUCT_PAGE_SIZE);
+          await loadCatalog("", PRODUCT_PAGE_SIZE);
           showToast("Producto desactivado");
         } catch (error) {
           showToast(String(error));
@@ -171,77 +205,147 @@ export function ProductsView({
     });
   };
 
+  const toggleProductSelection = (productId: number) => {
+    setSelectedProductIds((current) => {
+      const next = new Set(current);
+      if (next.has(productId)) next.delete(productId);
+      else next.add(productId);
+      return next;
+    });
+  };
+
+  const toggleSelectPage = () => {
+    setSelectedProductIds((current) => {
+      if (allPageSelected) return new Set();
+      const next = new Set(current);
+      pageProducts.forEach((product) => next.add(product.id));
+      return next;
+    });
+  };
+
+  const applyBulkEdit = async () => {
+    if (selectedProducts.length === 0) {
+      showToast("Selecciona productos");
+      return;
+    }
+    const nextCategory = bulkEdit.category.trim();
+    const nextUnit = bulkEdit.unit.trim();
+    const nextTaxRate = bulkEdit.tax_ids.reduce((sum, taxId) => {
+      const tax = activeTaxOptions.find((option) => option.id === taxId);
+      return sum + (tax?.rate ?? 0);
+    }, 0);
+    const hasChanges = Boolean(nextCategory || nextUnit || bulkEdit.updateTaxes);
+    if (!hasChanges) {
+      showToast("Elige al menos un cambio");
+      return;
+    }
+    setBusy(true);
+    try {
+      await Promise.all(selectedProducts.map((product) => upsertProduct({
+        ...product,
+        category: nextCategory || product.category,
+        unit: nextUnit || product.unit,
+        tax_ids: bulkEdit.updateTaxes ? bulkEdit.tax_ids : taxIdsForProduct(product),
+        tax_rate: bulkEdit.updateTaxes ? nextTaxRate : product.tax_rate,
+      })));
+      setBulkEdit(emptyBulkEdit);
+      setSelectedProductIds(new Set());
+      await loadCatalog(catalogQuery);
+      showToast(`${selectedProducts.length} productos actualizados`);
+    } catch (error) {
+      showToast(String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeSelected = () => {
+    if (selectedProducts.length === 0) {
+      showToast("Selecciona productos");
+      return;
+    }
+    requestConfirm({
+      title: "Borrar productos",
+      message: `Vas a borrar ${selectedProducts.length} productos. Ya no saldran en busqueda ni venta.`,
+      confirmLabel: `Borrar ${selectedProducts.length}`,
+      tone: "danger",
+      onConfirm: async () => {
+        setBusy(true);
+        try {
+          await Promise.all(selectedProducts.map((product) => deleteProduct(product.id)));
+          setSelectedProductIds(new Set());
+          await loadCatalog(catalogQuery);
+          showToast(`${selectedProducts.length} productos borrados`);
+        } catch (error) {
+          showToast(String(error));
+        } finally {
+          setBusy(false);
+        }
+      },
+    });
+  };
+
   const exportProducts = () => {
-    const header = ["sku", "barcode", "name", "category", "unit", "price", "cost", "stock", "tax_ids", "tax_rate", "active"];
-    const rows = products.map((product) => [
-      product.sku,
-      product.barcode,
-      product.name,
-      product.category,
-      product.unit,
-      product.price,
-      product.cost,
-      product.stock,
-      product.tax_ids.join("|"),
-      product.tax_rate,
-      product.active,
-    ]);
-    downloadCsv(`productos-rim-pos-${new Date().toISOString().slice(0, 10)}.csv`, [header, ...rows]);
+    downloadXlsx(`catalogo-rim-pos-${new Date().toISOString().slice(0, 10)}.xlsx`, eleventaRowsFromProducts(pageProducts, activeTaxOptions));
+  };
+
+  const parseCsvImportFile = async (file: File) => {
+    const text = await file.text();
+    const [headerLine, ...lines] = text.split(/\r?\n/).filter((line) => line.trim());
+    if (!headerLine) throw new Error("CSV vacio");
+    const headers = parseCsvLine(headerLine).map((header) => header.trim());
+    const rows = lines.flatMap((line, index): ProductImportRow[] => {
+      const values = parseCsvLine(line);
+      const row = Object.fromEntries(headers.map((header, index) => [header, values[index] ?? ""]));
+      const rowNumber = index + 2;
+      if (!row.name) return [];
+      const barcode = normalizeBarcode(row.barcode || row["Código"] || row.codigo || "");
+      const name = row.name.trim().replace(/\s+/g, " ");
+      return [{
+        row_number: rowNumber,
+        sku: barcode,
+        barcode,
+        name,
+        category: suggestCategory(name, row.category || "Abarrotes"),
+        unit: row.unit || "pieza",
+        price: Number(row.price || 0),
+        wholesale_price: row.wholesale_price ? Number(row.wholesale_price) : null,
+        cost: Number(row.cost || 0),
+        stock: Number(row.stock || 0),
+        min_stock: Number(row.min_stock || 0),
+        tax_ids: String(row.tax_ids || "").split("|").map(Number).filter((value) => Number.isFinite(value) && value > 0),
+        tax_rate: Number(row.tax_rate || 0),
+        active: row.active !== "false",
+      }];
+    });
+    return { rows, issues: [] as ProductImportIssue[] };
   };
 
   const parseImportFile = async (file: File) => {
     try {
-      const text = await file.text();
-      const [headerLine, ...lines] = text.split(/\r?\n/).filter((line) => line.trim());
-      if (!headerLine) throw new Error("CSV vacio");
-      const headers = parseCsvLine(headerLine).map((header) => header.trim());
-      const nextRows: ProductImportRow[] = [];
-      const nextIssues: ProductImportIssue[] = [];
-      const seenSkus = new Set<string>();
+      const isXlsx = file.name.toLowerCase().endsWith(".xlsx");
+      const parsed = isXlsx
+        ? { rows: await parseEleventaCatalogXlsx(file, activeTaxOptions), issues: [] }
+        : await parseCsvImportFile(file);
+      const nextIssues = [...parsed.issues];
       const seenBarcodes = new Set<string>();
-      lines.forEach((line, index) => {
-        const values = parseCsvLine(line);
-        const row = Object.fromEntries(headers.map((header, index) => [header, values[index] ?? ""]));
-        const rowNumber = index + 2;
-        if (!row.name) return;
-        const barcode = normalizeBarcode(row.barcode || row.sku || "");
-        const sku = (row.sku || barcode || `SKU-${Date.now()}-${index}`).trim().toUpperCase();
-        const name = row.name.trim().replace(/\s+/g, " ");
-        const parsed: ProductImportRow = {
-          row_number: rowNumber,
-          sku,
-          barcode,
-          name,
-          category: suggestCategory(name, row.category || "Abarrotes"),
-          unit: row.unit || "pieza",
-          price: Number(row.price || 0),
-          cost: Number(row.cost || 0),
-          stock: Number(row.stock || 0),
-          min_stock: Number(row.min_stock || 0),
-          tax_ids: String(row.tax_ids || "").split("|").map(Number).filter((value) => Number.isFinite(value) && value > 0),
-          tax_rate: Number(row.tax_rate || 0),
-          active: row.active !== "false",
-        };
-        const issue = (message: string) => nextIssues.push({ row_number: rowNumber, sku, barcode, message });
-        if (parsed.sku.length < 2) issue("SKU requerido");
-        if (parsed.barcode.length < 2) issue("Codigo requerido");
-        if (parsed.name.length < 2) issue("Nombre requerido");
-        if ([parsed.price, parsed.cost, parsed.stock, parsed.min_stock, parsed.tax_rate].some((value) => !Number.isFinite(value) || value < 0)) {
+      parsed.rows.forEach((row) => {
+        const issue = (message: string) => nextIssues.push({ row_number: row.row_number, sku: "", barcode: row.barcode, message });
+        if (row.barcode.trim().length < 1) issue("Codigo requerido");
+        if (row.name.trim().length < 2) issue("Nombre requerido");
+        if ([row.price, row.wholesale_price ?? 0, row.cost, row.stock, row.min_stock, row.tax_rate].some((value) => !Number.isFinite(value) || value < 0)) {
           issue("Importe o existencia invalida");
         }
-        const skuKey = parsed.sku.toLowerCase();
-        if (seenSkus.has(skuKey)) issue("SKU duplicado en archivo");
-        seenSkus.add(skuKey);
-        if (seenBarcodes.has(parsed.barcode)) issue("Codigo duplicado en archivo");
-        seenBarcodes.add(parsed.barcode);
-        nextRows.push(parsed);
+        const barcodeKey = row.barcode.trim();
+        if (seenBarcodes.has(barcodeKey)) issue("Codigo duplicado en archivo");
+        seenBarcodes.add(barcodeKey);
       });
-      if (nextRows.length === 0) {
-        nextIssues.push({ row_number: 0, sku: "", barcode: "", message: "CSV sin productos" });
+      if (parsed.rows.length === 0) {
+        nextIssues.push({ row_number: 0, sku: "", barcode: "", message: "Archivo sin productos" });
       }
       setLastImportResult(null);
-      setImportPreview({ fileName: file.name, rows: nextRows, issues: nextIssues });
-      showToast(`${nextRows.length} filas listas para revisar`);
+      setImportPreview({ fileName: file.name, rows: parsed.rows, issues: nextIssues });
+      showToast(`${parsed.rows.length} filas listas para revisar`);
     } catch (error) {
       showToast(String(error));
     } finally {
@@ -261,7 +365,7 @@ export function ProductsView({
       setLastImportResult(result);
       if (result.committed) {
         setImportPreview(null);
-        await refreshProducts(catalogQuery);
+        await loadCatalog(catalogQuery);
         showToast(`${result.imported} productos importados`);
       } else {
         setImportPreview({ ...importPreview, issues: result.issues });
@@ -286,14 +390,14 @@ export function ProductsView({
             ref={importInputRef}
             className="hidden-file-input"
             type="file"
-            accept=".csv,text/csv"
+            accept=".csv,text/csv,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             onChange={(event) => {
               const file = event.target.files?.[0];
               if (file) parseImportFile(file);
             }}
           />
-          <button className="ghost-button" type="button" onClick={() => importInputRef.current?.click()}>Importar CSV</button>
-          <button className="ghost-button" type="button" onClick={exportProducts}>Exportar CSV</button>
+          <button className="ghost-button" type="button" onClick={() => importInputRef.current?.click()}>Importar catalogo</button>
+          <button className="ghost-button" type="button" onClick={exportProducts}>Exportar Excel</button>
           <button className="ghost-button" type="button" onClick={() => setEditorOpen((current) => !current)}>
             {editorOpen ? "Ocultar formulario" : "Mostrar formulario"}
           </button>
@@ -303,15 +407,17 @@ export function ProductsView({
         </button>
         </div>
       </div>
-      <form className="catalog-search" onSubmit={(event) => { event.preventDefault(); refreshProducts(catalogQuery).catch((error) => showToast(String(error))); }}>
+      <form className="catalog-search" onSubmit={(event) => { event.preventDefault(); setCatalogLimit(PRODUCT_PAGE_SIZE); loadCatalog(catalogQuery, PRODUCT_PAGE_SIZE).catch((error) => showToast(String(error))); }}>
         <Search size={18} />
         <input
           value={catalogQuery}
           onChange={(event) => {
-            setCatalogQuery(event.target.value);
-            refreshProducts(event.target.value).catch((error) => showToast(String(error)));
+            const nextQuery = event.target.value;
+            setCatalogQuery(nextQuery);
+            setCatalogLimit(PRODUCT_PAGE_SIZE);
+            loadCatalog(nextQuery, PRODUCT_PAGE_SIZE).catch((error) => showToast(String(error)));
           }}
-          placeholder="Buscar producto por nombre, codigo, SKU o departamento"
+          placeholder="Buscar producto por nombre, codigo o departamento"
         />
       </form>
       {importPreview && (
@@ -333,9 +439,9 @@ export function ProductsView({
           {importPreview.issues.length > 0 ? (
             <div className="import-issues" role="status">
               {importPreview.issues.slice(0, 8).map((issue) => (
-                <div className="import-issue-row" key={`${issue.row_number}-${issue.message}-${issue.sku}-${issue.barcode}`}>
+                <div className="import-issue-row" key={`${issue.row_number}-${issue.message}-${issue.barcode}`}>
                   <strong>Fila {issue.row_number}</strong>
-                  <span>{issue.sku || issue.barcode || "sin codigo"}</span>
+                  <span>{issue.barcode || "sin codigo"}</span>
                   <em>{issue.message}</em>
                 </div>
               ))}
@@ -394,16 +500,16 @@ export function ProductsView({
           <input value={form.barcode} onChange={(event) => setForm({ ...form, barcode: event.target.value })} />
         </label>
         <label>
-          SKU
-          <input value={form.sku} onChange={(event) => setForm({ ...form, sku: event.target.value })} />
-        </label>
-        <label>
           Departamento
           <input value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value })} />
         </label>
         <label>
           Precio de venta
           <input type="number" step="0.01" value={form.price === 0 ? "" : form.price} onFocus={selectNumericInput} onChange={(event) => setForm({ ...form, price: Number(event.target.value) })} />
+        </label>
+        <label>
+          Precio Mayoreo
+          <input type="number" step="0.01" value={form.wholesale_price ? form.wholesale_price : ""} onFocus={selectNumericInput} onChange={(event) => setForm({ ...form, wholesale_price: event.target.value === "" ? null : Number(event.target.value) })} />
         </label>
         <label>
           Precio de compra
@@ -446,30 +552,107 @@ export function ProductsView({
         </button>
       </form>
       )}
+      {selectedProducts.length > 0 && (
+      <section className="bulk-product-bar" aria-label="Acciones masivas de productos">
+        <div className="bulk-product-summary">
+          <strong>{selectedProducts.length} seleccionados</strong>
+          <span>{pageProducts.length} visibles</span>
+        </div>
+        <div className="bulk-product-fields">
+          <label>
+            Departamento
+            <input value={bulkEdit.category} onChange={(event) => setBulkEdit({ ...bulkEdit, category: event.target.value })} placeholder="Sin cambio" />
+          </label>
+          <label>
+            Unidad
+            <select value={bulkEdit.unit} onChange={(event) => setBulkEdit({ ...bulkEdit, unit: event.target.value })}>
+              <option value="">Sin cambio</option>
+              <option value="pieza">pieza</option>
+              <option value="kg">kg</option>
+              <option value="litro">litro</option>
+            </select>
+          </label>
+          <label className="bulk-tax-toggle">
+            <input
+              type="checkbox"
+              checked={bulkEdit.updateTaxes}
+              onChange={(event) => setBulkEdit({ ...bulkEdit, updateTaxes: event.target.checked })}
+            />
+            Cambiar impuestos
+          </label>
+          {bulkEdit.updateTaxes && (
+            <div className="bulk-tax-options" role="group" aria-label="Impuestos masivos">
+              {activeTaxOptions.map((tax) => (
+                <label key={tax.id}>
+                  <input
+                    type="checkbox"
+                    checked={bulkEdit.tax_ids.includes(tax.id)}
+                    onChange={(event) => {
+                      const nextIds = event.target.checked
+                        ? [...bulkEdit.tax_ids, tax.id]
+                        : bulkEdit.tax_ids.filter((taxId) => taxId !== tax.id);
+                      setBulkEdit({ ...bulkEdit, tax_ids: nextIds });
+                    }}
+                  />
+                  <span>{tax.name}</span>
+                </label>
+              ))}
+              <strong>{formatTaxPercent(bulkEdit.tax_ids.reduce((sum, taxId) => sum + (activeTaxOptions.find((option) => option.id === taxId)?.rate ?? 0), 0))} total</strong>
+            </div>
+          )}
+        </div>
+        <div className="bulk-product-actions">
+          <button className="ghost-button" type="button" disabled={busy || selectedProducts.length === 0} onClick={applyBulkEdit}>
+            Aplicar cambios
+          </button>
+          <button className="danger-button" type="button" disabled={busy || selectedProducts.length === 0} onClick={removeSelected}>
+            Borrar
+          </button>
+        </div>
+      </section>
+      )}
       <div className="data-table">
         <div className="table-head catalog-row">
+          <label className="row-checkbox header-checkbox" aria-label="Seleccionar todos los productos visibles">
+            <input
+              type="checkbox"
+              checked={allPageSelected}
+              disabled={pageProducts.length === 0}
+              onChange={toggleSelectPage}
+            />
+          </label>
           <span>Producto</span>
           <span>Codigo</span>
           <span>Departamento</span>
           <span>Compra</span>
           <span>Venta</span>
+          <span>Mayoreo</span>
           <span>IVA</span>
           <span>IEPS</span>
         </div>
-        {products.length === 0 ? (
+        {pageProducts.length === 0 ? (
           <div className="table-empty">Sin productos activos</div>
-        ) : products.map((product) => (
-          <div className="catalog-row" key={product.id}>
+        ) : pageProducts.map((product) => (
+          <div className={`catalog-row ${selectedProductIds.has(product.id) ? "selected" : ""}`} key={product.id}>
+            <label className="row-checkbox" aria-label={`Seleccionar ${product.name}`}>
+              <input
+                type="checkbox"
+                checked={selectedProductIds.has(product.id)}
+                onChange={() => toggleProductSelection(product.id)}
+              />
+            </label>
             <strong>{product.name}</strong>
             <span>{product.barcode}</span>
             <span>{product.category}</span>
             <span>{money(product.cost)}</span>
             <span>{money(product.price)}</span>
+            <span>{product.wholesale_price ? money(product.wholesale_price) : "-"}</span>
             <span>{formatTaxPercent(taxBreakdownForProduct(product).iva)}</span>
             <span>{formatTaxPercent(taxBreakdownForProduct(product).ieps)}</span>
             <button className="ghost-button row-action" type="button" onClick={() => {
               setForm({
                 ...product,
+                wholesale_price: product.wholesale_price ?? null,
                 tax_ids: taxIdsForProduct(product),
               });
               setEditorOpen(true);
@@ -481,6 +664,34 @@ export function ProductsView({
             </button>
           </div>
         ))}
+      </div>
+      <div className="table-pagination">
+        <span>{pageProducts.length === 0 ? "Sin resultados" : `${catalogPageEnd} productos visibles por codigo`}</span>
+        <div>
+          <button
+            className="ghost-button"
+            type="button"
+            disabled={!hasMoreProducts}
+            onClick={() => {
+              const nextLimit = catalogLimit + PRODUCT_LOAD_MORE_SIZE;
+              setCatalogLimit(nextLimit);
+              loadCatalog(catalogQuery, nextLimit).catch((error) => showToast(String(error)));
+            }}
+          >
+            Ver mas
+          </button>
+          <button
+            className="ghost-button"
+            type="button"
+            disabled={!hasMoreProducts}
+            onClick={() => {
+              setCatalogLimit(PRODUCT_VIEW_ALL_LIMIT);
+              loadCatalog(catalogQuery, PRODUCT_VIEW_ALL_LIMIT).catch((error) => showToast(String(error)));
+            }}
+          >
+            Ver todo
+          </button>
+        </div>
       </div>
     </section>
   );

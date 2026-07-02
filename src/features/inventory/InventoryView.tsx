@@ -4,8 +4,11 @@ import { Metric } from "../../components/display/SummaryCards";
 import { downloadCsv } from "../../lib/csv";
 import { money, roundMoney } from "../../lib/money";
 import { adjustInventory, listInventoryMovements } from "../../lib/posApi";
+import type { ProductSearchOptions } from "../../lib/posApi";
 import type { InventoryMovement, Product } from "../../types";
 import { InventoryAdjustmentModal } from "./InventoryModals";
+
+const INVENTORY_PAGE_SIZE = 50;
 
 export function InventoryView({
   products,
@@ -13,27 +16,21 @@ export function InventoryView({
   showToast,
 }: {
   products: Product[];
-  refreshProducts: (query?: string) => Promise<void>;
+  refreshProducts: (query?: string, options?: ProductSearchOptions) => Promise<void>;
   showToast: (message: string) => void;
 }) {
   const [adjustmentProduct, setAdjustmentProduct] = useState<Product | null>(null);
   const [movements, setMovements] = useState<InventoryMovement[]>([]);
   const [inventoryQuery, setInventoryQuery] = useState("");
+  const [inventoryPage, setInventoryPage] = useState(0);
   const inventorySearchRef = useRef<HTMLInputElement>(null);
-  const zeroStock = useMemo(() => products.filter((product) => product.stock <= 0), [products]);
-  const inventoryValue = useMemo(() => products.reduce((sum, product) => sum + product.stock * product.cost, 0), [products]);
-  const totalUnits = useMemo(() => products.reduce((sum, product) => sum + product.stock, 0), [products]);
-  const normalizedInventoryQuery = useMemo(() => inventoryQuery.trim().toLowerCase(), [inventoryQuery]);
-  const visibleProducts = useMemo(() => products.filter((product) => {
-    const query = normalizedInventoryQuery;
-    if (!query) return true;
-    return (
-      product.name.toLowerCase().includes(query) ||
-      product.barcode.toLowerCase().includes(query) ||
-      product.sku.toLowerCase().includes(query) ||
-      product.category.toLowerCase().includes(query)
-    );
-  }), [normalizedInventoryQuery, products]);
+  const visibleProducts = useMemo(() => products.slice(0, INVENTORY_PAGE_SIZE), [products]);
+  const zeroStock = useMemo(() => visibleProducts.filter((product) => product.stock <= 0), [visibleProducts]);
+  const inventoryValue = useMemo(() => visibleProducts.reduce((sum, product) => sum + product.stock * product.cost, 0), [visibleProducts]);
+  const totalUnits = useMemo(() => visibleProducts.reduce((sum, product) => sum + product.stock, 0), [visibleProducts]);
+  const inventoryPageStart = inventoryPage * INVENTORY_PAGE_SIZE + 1;
+  const inventoryPageEnd = inventoryPage * INVENTORY_PAGE_SIZE + visibleProducts.length;
+  const hasNextInventoryPage = products.length > INVENTORY_PAGE_SIZE;
   const latestMovementByProduct = useMemo(() => {
     const latest = new Map<number, InventoryMovement>();
     movements.forEach((movement) => {
@@ -45,6 +42,10 @@ export function InventoryView({
   const refreshKardex = useCallback(async () => {
     setMovements(await listInventoryMovements(undefined));
   }, []);
+
+  const loadInventoryPage = useCallback(async (query: string, page: number) => {
+    await refreshProducts(query, { limit: INVENTORY_PAGE_SIZE + 1, offset: page * INVENTORY_PAGE_SIZE });
+  }, [refreshProducts]);
 
   useEffect(() => {
     refreshKardex().catch((error) => showToast(String(error)));
@@ -64,7 +65,8 @@ export function InventoryView({
     if (!adjustmentProduct) return;
     try {
       await adjustInventory({ product_id: adjustmentProduct.id, quantity, reason });
-      await refreshProducts("");
+      setInventoryPage(0);
+      await loadInventoryPage("", 0);
       await refreshKardex();
       setAdjustmentProduct(null);
       showToast("Inventario ajustado");
@@ -83,10 +85,7 @@ export function InventoryView({
     event.preventDefault();
     const query = inventoryQuery.trim().toLowerCase();
     if (!query) return;
-    const exactMatch = products.find((product) =>
-      product.barcode.toLowerCase() === query ||
-      product.sku.toLowerCase() === query,
-    );
+    const exactMatch = products.find((product) => product.barcode.toLowerCase() === query);
     const targetProduct = exactMatch ?? (visibleProducts.length === 1 ? visibleProducts[0] : null);
     if (!targetProduct) {
       showToast("Producto no encontrado en inventario");
@@ -97,10 +96,9 @@ export function InventoryView({
 
   const exportInventory = () => {
     downloadCsv(`inventario-rim-pos-${new Date().toISOString().slice(0, 10)}.csv`, [
-      ["producto", "sku", "codigo", "departamento", "existencia", "unidad", "costo", "valor_costo", "ultimo_movimiento"],
+      ["producto", "codigo", "departamento", "existencia", "unidad", "costo", "valor_costo", "ultimo_movimiento"],
       ...visibleProducts.map((product) => [
         product.name,
-        product.sku,
         product.barcode,
         product.category,
         product.stock,
@@ -133,10 +131,15 @@ export function InventoryView({
         <Search size={18} />
         <input
           value={inventoryQuery}
-          onChange={(event) => setInventoryQuery(event.target.value)}
+          onChange={(event) => {
+            const nextQuery = event.target.value;
+            setInventoryQuery(nextQuery);
+            setInventoryPage(0);
+            loadInventoryPage(nextQuery, 0).catch((error) => showToast(String(error)));
+          }}
           onKeyDown={submitInventorySearch}
           ref={inventorySearchRef}
-          placeholder="Buscar en inventario por producto, codigo, SKU o departamento"
+          placeholder="Buscar en inventario por producto, codigo o departamento"
         />
       </form>
       <div className="inventory-layout">
@@ -147,7 +150,7 @@ export function InventoryView({
             <span>Ultimo movimiento</span>
             <span>Ajuste</span>
           </div>
-          {products.length === 0 ? (
+          {visibleProducts.length === 0 ? (
             <div className="table-empty">Sin productos para mostrar</div>
           ) : visibleProducts.map((product) => (
             <div className="inventory-row" key={product.id}>
@@ -163,6 +166,35 @@ export function InventoryView({
               </button>
             </div>
           ))}
+          <div className="table-pagination">
+            <span>{visibleProducts.length === 0 ? "Sin resultados" : `Mostrando ${inventoryPageStart}-${inventoryPageEnd} por codigo`}</span>
+            <div>
+              <button
+                className="ghost-button"
+                type="button"
+                disabled={inventoryPage === 0}
+                onClick={() => {
+                  const nextPage = inventoryPage - 1;
+                  setInventoryPage(nextPage);
+                  loadInventoryPage(inventoryQuery, nextPage).catch((error) => showToast(String(error)));
+                }}
+              >
+                Anterior
+              </button>
+              <button
+                className="ghost-button"
+                type="button"
+                disabled={!hasNextInventoryPage}
+                onClick={() => {
+                  const nextPage = inventoryPage + 1;
+                  setInventoryPage(nextPage);
+                  loadInventoryPage(inventoryQuery, nextPage).catch((error) => showToast(String(error)));
+                }}
+              >
+                Siguiente
+              </button>
+            </div>
+          </div>
         </div>
         <aside className="inventory-side">
           <h3>Kardex</h3>

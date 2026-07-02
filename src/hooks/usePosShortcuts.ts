@@ -16,6 +16,7 @@ export function usePosShortcuts({
   holdCurrentTicket,
   openExpenseDialog,
   openDrawer,
+  applyWholesaleToSelectedLine,
   setSelectedCartProductId,
   setQuery,
   setProducts,
@@ -33,6 +34,7 @@ export function usePosShortcuts({
   holdCurrentTicket: () => void | Promise<void>;
   openExpenseDialog: () => void;
   openDrawer: () => Promise<void>;
+  applyWholesaleToSelectedLine: () => void;
   setSelectedCartProductId: (productId: number) => void;
   setQuery: (value: string) => void;
   setProducts: (products: Product[]) => void;
@@ -139,7 +141,7 @@ export function usePosShortcuts({
         return;
       }
       if (key === "F11") {
-        requestView("cash");
+        applyWholesaleToSelectedLine();
         return;
       }
       if (key === "F12") {
@@ -159,6 +161,7 @@ export function usePosShortcuts({
   }, [
     cart,
     cashRef,
+    applyWholesaleToSelectedLine,
     completeSale,
     currentView,
     holdCurrentTicket,

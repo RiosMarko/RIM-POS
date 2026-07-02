@@ -11,6 +11,7 @@ import type {
   CashSession,
   Customer,
   CustomerInput,
+  DailyCutSummary,
   DashboardSummary,
   HeldTicket,
   HeldTicketItem,
@@ -35,6 +36,7 @@ import type {
   ShiftCutSnapshot,
   Supplier,
   SupplierInput,
+  TaxBreakdown,
   TaxOption,
   UserAccount,
   PermissionKey,
@@ -68,6 +70,7 @@ let demoProducts: Product[] = [
     category: "Bebidas",
     unit: "pieza",
     price: 18,
+    wholesale_price: null,
     cost: 12,
     stock: 48,
     min_stock: 12,
@@ -83,6 +86,7 @@ let demoProducts: Product[] = [
     category: "Abarrotes",
     unit: "kg",
     price: 24,
+    wholesale_price: null,
     cost: 18,
     stock: 30,
     min_stock: 5,
@@ -98,6 +102,7 @@ let demoProducts: Product[] = [
     category: "Abarrotes",
     unit: "pieza",
     price: 82,
+    wholesale_price: null,
     cost: 68,
     stock: 16,
     min_stock: 4,
@@ -113,6 +118,7 @@ let demoProducts: Product[] = [
     category: "Botanas",
     unit: "pieza",
     price: 17,
+    wholesale_price: null,
     cost: 11.5,
     stock: 40,
     min_stock: 10,
@@ -128,6 +134,7 @@ let demoProducts: Product[] = [
     category: "Lacteos",
     unit: "pieza",
     price: 29.5,
+    wholesale_price: null,
     cost: 23,
     stock: 24,
     min_stock: 8,
@@ -143,6 +150,7 @@ let demoProducts: Product[] = [
     category: "Limpieza",
     unit: "pieza",
     price: 21,
+    wholesale_price: null,
     cost: 15,
     stock: 20,
     min_stock: 6,
@@ -264,19 +272,29 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
   return invoke<T>(command, args);
 }
 
-export async function searchProducts(query: string): Promise<Product[]> {
+export type ProductSearchOptions = {
+  limit?: number;
+  offset?: number;
+};
+
+export async function searchProducts(query: string, options: ProductSearchOptions = {}): Promise<Product[]> {
+  const limit = options.limit ?? 40;
+  const offset = options.offset ?? 0;
   if (isTauri()) {
-    return call<Product[]>("product_search", { actorId: requireActorId(), query, limit: 40 });
+    return call<Product[]>("product_search", { actorId: requireActorId(), query, limit, offset });
   }
   const normalized = query.trim().toLowerCase();
-  if (!normalized) return demoProducts;
-  return demoProducts.filter(
-    (product) =>
+  const matched = normalized
+    ? demoProducts.filter((product) =>
       product.name.toLowerCase().includes(normalized) ||
       product.category.toLowerCase().includes(normalized) ||
       product.sku.toLowerCase().includes(normalized) ||
       product.barcode === normalized,
-  );
+    )
+    : demoProducts;
+  return [...matched]
+    .sort((left, right) => left.barcode.localeCompare(right.barcode) || left.name.localeCompare(right.name))
+    .slice(offset, offset + limit);
 }
 
 export async function getProductsByIds(ids: number[]): Promise<Product[]> {
@@ -305,28 +323,23 @@ export async function bulkImportProducts(rows: ProductImportRow[]): Promise<Prod
     return call<ProductImportResult>("product_bulk_import", { actorId: requireActorId(), rows });
   }
   const issues: ProductImportResult["issues"] = [];
-  const seenSkus = new Set<string>();
   const seenBarcodes = new Set<string>();
   const prepared = rows.map((row) => {
-    const sku = row.sku.trim().toUpperCase();
     const barcode = row.barcode.trim();
+    const sku = barcode;
     const name = row.name.trim();
     const category = row.category.trim();
     const unit = row.unit.trim();
     const issue = (message: string) => {
-      issues.push({ row_number: row.row_number, sku, barcode, message });
+      issues.push({ row_number: row.row_number, sku: "", barcode, message });
     };
-    if (sku.length < 2) issue("SKU requerido");
-    if (barcode.length < 2) issue("Codigo requerido");
+    if (barcode.length < 1) issue("Codigo requerido");
     if (name.length < 2) issue("Nombre requerido");
     if (category.length < 2) issue("Departamento requerido");
     if (unit.length < 1) issue("Unidad requerida");
-    if ([row.price, row.cost, row.stock, row.min_stock, row.tax_rate].some((value) => !Number.isFinite(value) || value < 0)) {
+    if ([row.price, row.wholesale_price ?? 0, row.cost, row.stock, row.min_stock, row.tax_rate].some((value) => !Number.isFinite(value) || value < 0)) {
       issue("Importe o existencia invalida");
     }
-    const skuKey = sku.toLowerCase();
-    if (seenSkus.has(skuKey)) issue("SKU duplicado en archivo");
-    seenSkus.add(skuKey);
     if (seenBarcodes.has(barcode)) issue("Codigo duplicado en archivo");
     seenBarcodes.add(barcode);
     return { ...row, sku, barcode, name, category, unit };
@@ -338,7 +351,7 @@ export async function bulkImportProducts(rows: ProductImportRow[]): Promise<Prod
   let updated = 0;
   prepared.forEach((row) => {
     const existing = demoProducts.find(
-      (product) => product.sku.toLowerCase() === row.sku.toLowerCase() || product.barcode === row.barcode,
+      (product) => product.barcode === row.barcode,
     );
     const id = existing?.id ?? Math.max(0, ...demoProducts.map((product) => product.id)) + 1;
     if (existing) updated += 1;
@@ -771,6 +784,12 @@ export async function createSale(input: {
   }, 0);
   const total = Math.round((subtotal + tax) * 100) / 100;
   const paid = input.payments.reduce((sum, payment) => sum + payment.amount, 0);
+  if (paid < total) throw new Error("Pago insuficiente");
+  const cashPaid = input.payments.filter((payment) => payment.method === "cash").reduce((sum, payment) => sum + payment.amount, 0);
+  const nonCashPaid = paid - cashPaid;
+  if (nonCashPaid > total) throw new Error("Tarjeta/credito excede total");
+  const cashNeeded = Math.max(0, total - nonCashPaid);
+  const changeDue = Math.max(0, cashPaid - cashNeeded);
   const createdAt = new Date().toISOString();
   const month = createdAt.slice(0, 7);
   const monthlySeq = (mockMonthlySeq.get(month) ?? 0) + 1;
@@ -783,7 +802,7 @@ export async function createSale(input: {
     discount: input.items.reduce((sum, item) => sum + item.discount, 0),
     total,
     paid,
-    change_due: Math.max(0, paid - total),
+    change_due: changeDue,
     created_at: createdAt,
   };
   mockSaleId += 1;
@@ -794,7 +813,7 @@ export async function createSale(input: {
     cashier_name: mockUsers.find((user) => user.id === input.cashier_id)?.name ?? "Cajero",
     total,
     paid,
-    cash_paid: input.payments.filter((payment) => payment.method === "cash").reduce((sum, payment) => sum + payment.amount, 0),
+    cash_paid: cashPaid,
     card_paid: input.payments.filter((payment) => payment.method === "card").reduce((sum, payment) => sum + payment.amount, 0),
     transfer_paid: input.payments.filter((payment) => payment.method === "transfer").reduce((sum, payment) => sum + payment.amount, 0),
     status: "paid",
@@ -820,7 +839,6 @@ export async function createSale(input: {
     mockInventoryMovementId += 1;
   });
   if (mockCashSession) {
-    const cashPaid = input.payments.filter((payment) => payment.method === "cash").reduce((sum, payment) => sum + payment.amount, 0);
     mockCashSession.sales_total += total;
     mockCashSession.expected_cash += cashPaid - receipt.change_due;
   }
@@ -952,6 +970,8 @@ function mockShiftCut(status = mockCashSession?.status ?? "closed"): ShiftCutSna
     status,
     opened_at: mockCashSession.opened_at,
     closed_at: mockCashSession.closed_at ?? null,
+    opened_by_name: "Admin",
+    closed_by_name: status === "closed" ? "Admin" : null,
     total_tickets: paidSales.length,
     canceled_tickets: canceledSales.length,
     gross_sales: netSales + discount,
@@ -1075,6 +1095,62 @@ export async function printShiftCut(shiftId: number): Promise<HardwareResult> {
   return { ok: true, message: `Demo navegador: corte ${shiftId}` };
 }
 
+function emptyDailyCutSummary(date = new Date().toISOString().slice(0, 10)): DailyCutSummary {
+  return {
+    date,
+    cut_count: 0,
+    total_tickets: 0,
+    canceled_tickets: 0,
+    gross_sales: 0,
+    net_sales: 0,
+    tax: 0,
+    discount: 0,
+    cash_paid: 0,
+    card_paid: 0,
+    transfer_paid: 0,
+    average_ticket: 0,
+    opening_cash: 0,
+    expected_cash: 0,
+    counted_cash: 0,
+    cash_difference: 0,
+    cuts: [],
+  };
+}
+
+export async function getDailyCutSummary(date?: string): Promise<DailyCutSummary> {
+  if (isTauri()) {
+    return call<DailyCutSummary>("daily_cut_summary", { actorId: requireActorId(), date: date ?? null });
+  }
+  const targetDate = date ?? new Date().toISOString().slice(0, 10);
+  const cuts = (mockLastCutZ ? [mockLastCutZ] : [])
+    .filter((cut) => cut.status === "closed" && (cut.closed_at ?? "").slice(0, 10) === targetDate);
+  const summary = emptyDailyCutSummary(targetDate);
+  summary.cuts = cuts;
+  summary.cut_count = cuts.length;
+  summary.total_tickets = cuts.reduce((sum, cut) => sum + cut.total_tickets, 0);
+  summary.canceled_tickets = cuts.reduce((sum, cut) => sum + cut.canceled_tickets, 0);
+  summary.gross_sales = cuts.reduce((sum, cut) => sum + cut.gross_sales, 0);
+  summary.net_sales = cuts.reduce((sum, cut) => sum + cut.net_sales, 0);
+  summary.tax = cuts.reduce((sum, cut) => sum + cut.tax, 0);
+  summary.discount = cuts.reduce((sum, cut) => sum + cut.discount, 0);
+  summary.cash_paid = cuts.reduce((sum, cut) => sum + cut.cash_paid, 0);
+  summary.card_paid = cuts.reduce((sum, cut) => sum + cut.card_paid, 0);
+  summary.transfer_paid = cuts.reduce((sum, cut) => sum + cut.transfer_paid, 0);
+  summary.opening_cash = cuts.reduce((sum, cut) => sum + cut.opening_cash, 0);
+  summary.expected_cash = cuts.reduce((sum, cut) => sum + cut.expected_cash, 0);
+  summary.counted_cash = cuts.reduce((sum, cut) => sum + (cut.counted_cash ?? cut.closing_cash ?? 0), 0);
+  summary.cash_difference = cuts.reduce((sum, cut) => sum + (cut.cash_difference ?? 0), 0);
+  summary.average_ticket = summary.total_tickets ? summary.net_sales / summary.total_tickets : 0;
+  return summary;
+}
+
+export async function printDailyCut(date?: string): Promise<HardwareResult> {
+  if (isTauri()) {
+    return call<HardwareResult>("print_daily_cut", { actorId: requireActorId(), date: date ?? null });
+  }
+  return { ok: true, message: `Demo navegador: corte general ${date ?? new Date().toISOString().slice(0, 10)}` };
+}
+
 export async function getMonthlySalesReport(month?: string): Promise<MonthlySalesReport[]> {
   if (isTauri()) {
     return call<MonthlySalesReport[]>("monthly_sales_report", { actorId: requireActorId(), month: month ?? null });
@@ -1150,7 +1226,7 @@ export async function getProductSalesReport(filters?: { fromDate?: string; toDat
   if (isTauri()) {
     return call<ProductSalesReport[]>("report_product_sales", {
       actorId: requireActorId(),
-      limit: 20,
+      limit: 100,
       fromDate: filters?.fromDate ?? null,
       toDate: filters?.toDate ?? null,
     });
@@ -1158,14 +1234,32 @@ export async function getProductSalesReport(filters?: { fromDate?: string; toDat
   return demoProducts.slice(0, 6).map((product) => ({
     product_id: product.id,
     product_name: product.name,
+    category: product.category,
     quantity: 0,
     total: 0,
+    gross_profit: 0,
   }));
 }
 
-export async function listReportMovements(): Promise<ReportMovement[]> {
+export async function getTaxBreakdown(filters?: { fromDate?: string; toDate?: string }): Promise<TaxBreakdown[]> {
   if (isTauri()) {
-    return call<ReportMovement[]>("report_movement_history", { actorId: requireActorId(), limit: 160 });
+    return call<TaxBreakdown[]>("report_tax_breakdown", {
+      actorId: requireActorId(),
+      fromDate: filters?.fromDate ?? null,
+      toDate: filters?.toDate ?? null,
+    });
+  }
+  return [];
+}
+
+export async function listReportMovements(filters?: { fromDate?: string; toDate?: string }): Promise<ReportMovement[]> {
+  if (isTauri()) {
+    return call<ReportMovement[]>("report_movement_history", {
+      actorId: requireActorId(),
+      limit: 500,
+      fromDate: filters?.fromDate ?? null,
+      toDate: filters?.toDate ?? null,
+    });
   }
   const rows: ReportMovement[] = [
     ...mockSales.map((sale) => ({
@@ -1174,9 +1268,12 @@ export async function listReportMovements(): Promise<ReportMovement[]> {
       title: sale.status === "paid" ? `Venta ${sale.folio}` : `Cancelacion ${sale.folio}`,
       detail: `${sale.cashier_name} · efectivo ${sale.cash_paid ?? 0} · tarjeta ${sale.card_paid ?? 0} · crédito ${sale.transfer_paid ?? 0}`,
       amount: sale.status === "paid" ? sale.total : -sale.total,
+      gross_profit: 0,
       cash_paid: sale.cash_paid ?? 0,
       card_paid: sale.card_paid ?? 0,
       transfer_paid: sale.transfer_paid ?? 0,
+      tax_total: 0,
+      card_terminal: null,
       actor_name: sale.cashier_name,
       cash_session_id: mockCashSession?.id ?? null,
       created_at: sale.created_at,
@@ -1187,9 +1284,12 @@ export async function listReportMovements(): Promise<ReportMovement[]> {
       title: movement.movement_type === "in" ? "Entrada caja" : movement.movement_type === "out" ? "Retiro caja" : "Cajon abierto",
       detail: movement.reason,
       amount: movement.movement_type === "in" ? movement.amount : movement.movement_type === "out" ? -movement.amount : 0,
+      gross_profit: 0,
       cash_paid: 0,
       card_paid: 0,
       transfer_paid: 0,
+      tax_total: 0,
+      card_terminal: null,
       actor_name: movement.actor_name,
       cash_session_id: movement.session_id,
       created_at: movement.created_at,
@@ -1200,9 +1300,12 @@ export async function listReportMovements(): Promise<ReportMovement[]> {
       title: `Compra ${purchase.id}`,
       detail: `${purchase.product_name} · ${purchase.supplier_name ?? "Sin proveedor"}`,
       amount: -purchase.total,
+      gross_profit: 0,
       cash_paid: 0,
       card_paid: 0,
       transfer_paid: 0,
+      tax_total: 0,
+      card_terminal: null,
       actor_name: null,
       cash_session_id: null,
       created_at: purchase.created_at,
@@ -1213,9 +1316,12 @@ export async function listReportMovements(): Promise<ReportMovement[]> {
       title: movement.movement_type === "purchase" ? "Inventario por compra" : "Inventario",
       detail: `${movement.product_name} · ${movement.reason} · ${movement.quantity}`,
       amount: 0,
+      gross_profit: 0,
       cash_paid: 0,
       card_paid: 0,
       transfer_paid: 0,
+      tax_total: 0,
+      card_terminal: null,
       actor_name: null,
       cash_session_id: null,
       created_at: movement.created_at,
@@ -1226,9 +1332,12 @@ export async function listReportMovements(): Promise<ReportMovement[]> {
       title: movement.amount > 0 ? "Cargo cliente" : "Abono cliente",
       detail: `${movement.customer_name} · ${movement.reason}`,
       amount: movement.amount,
+      gross_profit: 0,
       cash_paid: 0,
       card_paid: 0,
       transfer_paid: 0,
+      tax_total: 0,
+      card_terminal: null,
       actor_name: null,
       cash_session_id: null,
       created_at: movement.created_at,

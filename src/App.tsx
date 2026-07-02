@@ -32,6 +32,7 @@ import { useAdminNavigation } from "./hooks/useAdminNavigation";
 import { usePosShortcuts } from "./hooks/usePosShortcuts";
 import { useToasts } from "./hooks/useToasts";
 import { useWindowMode } from "./hooks/useWindowMode";
+import { loadCardTerminals } from "./lib/cardTerminals";
 import { cartTotals, roundMoney } from "./lib/money";
 import {
   createSale,
@@ -53,6 +54,7 @@ import {
   searchProducts,
   needsInitialSetup,
   setApiActor,
+  type ProductSearchOptions,
 } from "./lib/posApi";
 import type { NavItem, ViewKey } from "./navigation";
 import type {
@@ -106,6 +108,8 @@ function App() {
   const [cashReceived, setCashReceived] = useState("");
   const [cardReceived, setCardReceived] = useState("");
   const [transferReceived, setTransferReceived] = useState("");
+  const [cardTerminals, setCardTerminals] = useState<string[]>([]);
+  const [selectedCardTerminal, setSelectedCardTerminal] = useState("");
   const [lastReceipt, setLastReceipt] = useState<SaleReceipt | null>(null);
   const [heldTickets, setHeldTickets] = useState<HeldTicket[]>([]);
   const [activeHeldTicketId, setActiveHeldTicketId] = useState<number | null>(null);
@@ -145,7 +149,9 @@ function App() {
   const cardPaid = Number(cardReceived) || 0;
   const transferPaid = Number(transferReceived) || 0;
   const paid = cashPaid + cardPaid + transferPaid;
-  const change = roundMoney(Math.max(0, paid - totals.total));
+  const nonCashPaid = cardPaid + transferPaid;
+  const cashNeeded = roundMoney(Math.max(0, totals.total - nonCashPaid));
+  const change = roundMoney(Math.max(0, cashPaid - cashNeeded));
   const shortage = roundMoney(Math.max(0, totals.total - paid));
 
   const handleLoginSuccess = useCallback(
@@ -182,10 +188,10 @@ function App() {
     [query],
   );
 
-  const refreshAdminProducts = useCallback(async (nextQuery = "") => {
+  const refreshAdminProducts = useCallback(async (nextQuery = "", options: ProductSearchOptions = { limit: 51, offset: 0 }) => {
     const requestId = adminProductSearchRequestRef.current + 1;
     adminProductSearchRequestRef.current = requestId;
-    const result = await searchProducts(nextQuery);
+    const result = await searchProducts(nextQuery, options);
     if (requestId !== adminProductSearchRequestRef.current) return;
     setAdminProducts(result);
   }, []);
@@ -205,8 +211,15 @@ function App() {
     });
   }, []);
 
+  const refreshCardTerminals = useCallback(() => {
+    const next = loadCardTerminals();
+    setCardTerminals(next);
+    setSelectedCardTerminal((current) => (current && next.includes(current) ? current : next[0] ?? ""));
+  }, []);
+
   useEffect(() => {
     if (!session) return;
+    refreshCardTerminals();
     const restoreMessage = window.localStorage.getItem("rim-pos-post-restore-message");
     if (restoreMessage) {
       window.localStorage.removeItem("rim-pos-post-restore-message");
@@ -235,7 +248,18 @@ function App() {
     });
     window.setTimeout(() => searchRef.current?.focus(), 50);
     return cancelIdle;
-  }, [session, showToast]);
+  }, [refreshCardTerminals, session, showToast]);
+
+  useEffect(() => {
+    if (!session) return;
+    const refresh = () => refreshCardTerminals();
+    window.addEventListener("focus", refresh);
+    window.addEventListener("rim-pos-card-terminals-updated", refresh);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      window.removeEventListener("rim-pos-card-terminals-updated", refresh);
+    };
+  }, [refreshCardTerminals, session]);
 
   useEffect(() => {
     if (!session || !summary) return;
@@ -252,13 +276,16 @@ function App() {
   }, [session, showToast, summary]);
 
   useEffect(() => {
-    if (currentView === "sale") window.setTimeout(() => searchRef.current?.focus(), 40);
-  }, [currentView]);
+    if (currentView === "sale") {
+      refreshCardTerminals();
+      window.setTimeout(() => searchRef.current?.focus(), 40);
+    }
+  }, [currentView, refreshCardTerminals]);
 
   useEffect(() => {
     if (!session) return;
     if (!["products", "inventory", "purchases"].includes(currentView)) return;
-    refreshAdminProducts("").catch((error) => showToast(String(error)));
+    refreshAdminProducts("", { limit: 51, offset: 0 }).catch((error) => showToast(String(error)));
   }, [currentView, refreshAdminProducts, session, showToast]);
 
   const addProduct = useCallback((product: Product, quantity = 1) => {
@@ -302,6 +329,24 @@ function App() {
     );
   }, [showToast]);
 
+  const applyWholesaleToSelectedLine = useCallback(() => {
+    const line = selectedCartProductId
+      ? cart.find((item) => item.product.id === selectedCartProductId)
+      : cart[cart.length - 1];
+    if (!line) {
+      showToast("No hay producto para mayoreo");
+      return;
+    }
+    const wholesalePrice = line.product.wholesale_price ?? 0;
+    if (wholesalePrice <= 0 || wholesalePrice >= line.product.price) {
+      showToast(`${line.product.name} sin precio de mayoreo menor`);
+      return;
+    }
+    const discount = roundMoney((line.product.price - wholesalePrice) * line.quantity);
+    updateLine(line.product.id, { discount });
+    showToast(`Mayoreo aplicado: ${line.product.name}`);
+  }, [cart, selectedCartProductId, showToast, updateLine]);
+
   useEffect(() => {
     setSelectedCartProductId((current) => {
       if (cart.length === 0) return null;
@@ -335,6 +380,14 @@ function App() {
       showToast("Pago insuficiente");
       return;
     }
+    if (nonCashPaid > totals.total) {
+      showToast("Tarjeta/credito no puede exceder total");
+      return;
+    }
+    if (cardPaid > 0 && !selectedCardTerminal) {
+      showToast("Selecciona terminal de tarjeta");
+      return;
+    }
     setBusy(true);
     try {
       const currentProducts = await getProductsByIds(cart.map((line) => line.product.id));
@@ -362,7 +415,7 @@ function App() {
         })),
         payments: [
           ...(cashPaid > 0 ? [{ method: "cash" as const, amount: cashPaid }] : []),
-          ...(cardPaid > 0 ? [{ method: "card" as const, amount: cardPaid }] : []),
+          ...(cardPaid > 0 ? [{ method: "card" as const, amount: cardPaid, reference: selectedCardTerminal }] : []),
           ...(transferPaid > 0 ? [{ method: "transfer" as const, amount: transferPaid }] : []),
         ],
       });
@@ -704,6 +757,75 @@ function App() {
     }
   }, [activeHeldTicketId, cart.length, clearActiveDraftForSession, clearSaleDraft, persistActiveHeldTicket, session, showToast]);
 
+  const runFunctionKeyAction = useCallback(async (key: string) => {
+    if (!session) return;
+    if (key === "F1") {
+      await completeSale({ printTicket: true });
+      return;
+    }
+    if (key === "F2") {
+      await completeSale({ printTicket: false });
+      return;
+    }
+    if (key === "F3") {
+      requestView("products");
+      return;
+    }
+    if (key === "F4") {
+      requestView("inventory");
+      return;
+    }
+    if (key === "F5") {
+      requestView("customers");
+      return;
+    }
+    if (key === "F6") {
+      await openHoldTicketDialog();
+      return;
+    }
+    if (key === "F7") {
+      const line = selectedCartProductId ? cart.find((item) => item.product.id === selectedCartProductId) : null;
+      if (!line) {
+        showToast("No hay producto para quitar");
+        return;
+      }
+      updateLine(line.product.id, { quantity: 0 });
+      showToast("Producto quitado");
+      return;
+    }
+    if (key === "F8") {
+      setExpenseOpen(true);
+      return;
+    }
+    if (key === "F9") {
+      cashRef.current?.focus();
+      return;
+    }
+    if (key === "F10") {
+      await openDrawerAndRecord();
+      return;
+    }
+    if (key === "F11") {
+      applyWholesaleToSelectedLine();
+      return;
+    }
+    if (key === "F12") {
+      requestView("settings");
+    }
+  }, [
+    cart,
+    cashRef,
+    completeSale,
+    applyWholesaleToSelectedLine,
+    openDrawerAndRecord,
+    openHoldTicketDialog,
+    requestView,
+    selectedCartProductId,
+    session,
+    showToast,
+    updateLine,
+  ]);
+
   usePosShortcuts({
     session,
     currentView,
@@ -717,6 +839,7 @@ function App() {
     holdCurrentTicket: openHoldTicketDialog,
     openExpenseDialog: () => setExpenseOpen(true),
     openDrawer: openDrawerAndRecord,
+    applyWholesaleToSelectedLine,
     setSelectedCartProductId,
     setQuery,
     setProducts: setSaleProducts,
@@ -791,6 +914,8 @@ function App() {
               cashReceived={cashReceived}
               cardReceived={cardReceived}
               transferReceived={transferReceived}
+              cardTerminals={cardTerminals}
+              selectedCardTerminal={selectedCardTerminal}
               lastReceipt={lastReceipt}
               heldTickets={heldTickets}
               activeHeldTicketId={activeHeldTicketId}
@@ -803,6 +928,7 @@ function App() {
               setCashReceived={setCashReceived}
               setCardReceived={setCardReceived}
               setTransferReceived={setTransferReceived}
+              setSelectedCardTerminal={setSelectedCardTerminal}
               refreshProducts={refreshSaleProducts}
               submitSearch={submitSearch}
               addProduct={addProduct}
@@ -816,6 +942,7 @@ function App() {
                 setTicketDeleteDraft(ticket);
                 return Promise.resolve();
               }}
+              runFunctionKeyAction={runFunctionKeyAction}
               showToast={showToast}
               openHeldTickets={() => setHeldTicketsOpen(true)}
             />
@@ -834,6 +961,7 @@ function App() {
                 setPricesIncludeTax(nextPricesIncludeTax);
               }}
               requestConfirm={setConfirmDraft}
+              requestView={requestView}
             />
           )}
         </ErrorBoundary>
