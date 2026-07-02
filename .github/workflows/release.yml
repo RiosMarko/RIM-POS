@@ -5,6 +5,9 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: write
+
 jobs:
   build-installers:
     strategy:
@@ -46,6 +49,6 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "RIM-POS ${{ github.ref_name }}"
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
