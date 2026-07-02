@@ -1,6 +1,7 @@
 import { CircleDollarSign, Search, ShoppingCart, Ticket, Trash2 } from "lucide-react";
 import { FormEvent, KeyboardEvent as ReactKeyboardEvent, RefObject, useEffect, useMemo, useRef, useState } from "react";
 import { cartTotals, money, roundMoney } from "../../lib/money";
+import { selectNumericInput } from "../../lib/numberInput";
 import type { CartLine, HeldTicket, Product, SaleReceipt } from "../../types";
 import { functionKeys } from "./SaleModals";
 
@@ -222,6 +223,7 @@ export function SaleView({
                     min="0"
                     step={line.product.unit === "kg" ? "0.001" : "1"}
                     value={line.quantity}
+                    onFocus={selectNumericInput}
                     onChange={(event) => updateLine(line.product.id, { quantity: Number(event.target.value) })}
                   />
                   <span className="money-cell">{money(line.product.price)}</span>
@@ -231,7 +233,8 @@ export function SaleView({
                     type="number"
                     min="0"
                     step="0.5"
-                    value={line.discount}
+                    value={line.discount === 0 ? "" : line.discount}
+                    onFocus={selectNumericInput}
                     onChange={(event) => updateLine(line.product.id, { discount: Number(event.target.value) })}
                   />
                   <strong className="money-cell">{money(line.product.price * line.quantity - line.discount)}</strong>
@@ -274,6 +277,7 @@ export function SaleView({
             min="0"
             step="0.5"
             value={cashReceived}
+            onFocus={selectNumericInput}
             onChange={(event) => setCashReceived(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === "Enter") completeSale();
@@ -290,6 +294,7 @@ export function SaleView({
               min="0"
               step="0.5"
               value={cardReceived}
+              onFocus={selectNumericInput}
               onChange={(event) => setCardReceived(event.target.value)}
             />
           </label>
@@ -301,6 +306,7 @@ export function SaleView({
               min="0"
               step="0.5"
               value={transferReceived}
+              onFocus={selectNumericInput}
               onChange={(event) => setTransferReceived(event.target.value)}
             />
           </label>

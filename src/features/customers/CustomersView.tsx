@@ -1,5 +1,6 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { money } from "../../lib/money";
+import { selectNumericInput } from "../../lib/numberInput";
 import { adjustCustomerCredit, listCustomers, upsertCustomer } from "../../lib/posApi";
 import type { Customer } from "../../types";
 import { CustomerCreditModal, type CustomerCreditDraft } from "./CustomerModals";
@@ -68,7 +69,7 @@ export function CustomersView({ showToast }: { showToast: (message: string) => v
         <label>Telefono<input value={form.phone} onChange={(event) => setForm({ ...form, phone: event.target.value })} /></label>
         <label>RFC<input value={form.rfc} onChange={(event) => setForm({ ...form, rfc: event.target.value })} /></label>
         <label>Email<input value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} /></label>
-        <label>Limite credito<input type="number" value={form.credit_limit} onChange={(event) => setForm({ ...form, credit_limit: Number(event.target.value) })} /></label>
+        <label>Limite credito<input type="number" value={form.credit_limit === 0 ? "" : form.credit_limit} onFocus={selectNumericInput} onChange={(event) => setForm({ ...form, credit_limit: Number(event.target.value) })} /></label>
         <div className="form-button-row">
           {editing && <button className="ghost-button" type="button" onClick={resetForm}>Nuevo cliente</button>}
           <button className="primary-button" type="submit">{editing ? "Actualizar cliente" : "Guardar cliente"}</button>

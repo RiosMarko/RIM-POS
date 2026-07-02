@@ -1,5 +1,6 @@
 import { Boxes } from "lucide-react";
 import { FormEvent, useState } from "react";
+import { selectNumericInput } from "../../lib/numberInput";
 import type { Product } from "../../types";
 
 export function InventoryAdjustmentModal({
@@ -42,7 +43,8 @@ export function InventoryAdjustmentModal({
             <input
               type="number"
               step="1"
-              value={quantity}
+              value={quantity === 0 ? "" : quantity}
+              onFocus={selectNumericInput}
               onChange={(event) => setQuantity(Number(event.target.value))}
               autoFocus
             />

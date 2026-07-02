@@ -3,6 +3,7 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "re
 import type { ConfirmDraft } from "../../components/modals/CommonModals";
 import { downloadCsv, parseCsvLine } from "../../lib/csv";
 import { money } from "../../lib/money";
+import { selectNumericInput } from "../../lib/numberInput";
 import { bulkImportProducts, deleteProduct, getSetting, listTaxes, upsertProduct } from "../../lib/posApi";
 import type { Product, ProductImportIssue, ProductImportResult, ProductImportRow, TaxOption } from "../../types";
 
@@ -402,15 +403,15 @@ export function ProductsView({
         </label>
         <label>
           Precio de venta
-          <input type="number" step="0.01" value={form.price} onChange={(event) => setForm({ ...form, price: Number(event.target.value) })} />
+          <input type="number" step="0.01" value={form.price === 0 ? "" : form.price} onFocus={selectNumericInput} onChange={(event) => setForm({ ...form, price: Number(event.target.value) })} />
         </label>
         <label>
           Precio de compra
-          <input type="number" step="0.01" value={form.cost} onChange={(event) => setForm({ ...form, cost: Number(event.target.value) })} />
+          <input type="number" step="0.01" value={form.cost === 0 ? "" : form.cost} onFocus={selectNumericInput} onChange={(event) => setForm({ ...form, cost: Number(event.target.value) })} />
         </label>
         <label>
           Stock
-          <input type="number" step="1" value={form.stock} onChange={(event) => setForm({ ...form, stock: Number(event.target.value) })} />
+          <input type="number" step="1" value={form.stock === 0 ? "" : form.stock} onFocus={selectNumericInput} onChange={(event) => setForm({ ...form, stock: Number(event.target.value) })} />
         </label>
         <div className="tax-picker" role="group" aria-label="Impuestos incluidos">
           <span className="tax-picker-title">Impuestos incluidos</span>

@@ -1,6 +1,7 @@
 import { CircleDollarSign } from "lucide-react";
 import { FormEvent, useState } from "react";
 import { money } from "../../lib/money";
+import { selectNumericInput } from "../../lib/numberInput";
 import type { Customer } from "../../types";
 
 export type CustomerCreditDraft = {
@@ -54,6 +55,7 @@ export function CustomerCreditModal({
               type="text"
               inputMode="decimal"
               value={amount}
+              onFocus={selectNumericInput}
               onChange={(event) => setAmount(event.target.value)}
               autoFocus
             />

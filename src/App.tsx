@@ -100,7 +100,8 @@ function App() {
   const clock = useClock();
   const { loginMaximized, windowTransition, enterPosMode, enterLoginMode } = useWindowMode(session);
   const [query, setQuery] = useState("");
-  const [products, setProducts] = useState<Product[]>([]);
+  const [saleProducts, setSaleProducts] = useState<Product[]>([]);
+  const [adminProducts, setAdminProducts] = useState<Product[]>([]);
   const [cart, setCart] = useState<CartLine[]>([]);
   const [cashReceived, setCashReceived] = useState("");
   const [cardReceived, setCardReceived] = useState("");
@@ -126,7 +127,8 @@ function App() {
   const cashRef = useRef<HTMLInputElement>(null);
   const recoveryCheckedSessionRef = useRef<number | null>(null);
   const lastSavedActiveDraftRef = useRef("");
-  const productSearchRequestRef = useRef(0);
+  const saleProductSearchRequestRef = useRef(0);
+  const adminProductSearchRequestRef = useRef(0);
 
   const isAdmin = session?.role === "admin";
   const {
@@ -169,16 +171,24 @@ function App() {
     setSummary(next);
   }, []);
 
-  const refreshProducts = useCallback(
+  const refreshSaleProducts = useCallback(
     async (nextQuery = query) => {
-      const requestId = productSearchRequestRef.current + 1;
-      productSearchRequestRef.current = requestId;
+      const requestId = saleProductSearchRequestRef.current + 1;
+      saleProductSearchRequestRef.current = requestId;
       const result = await searchProducts(nextQuery);
-      if (requestId !== productSearchRequestRef.current) return;
-      setProducts(result);
+      if (requestId !== saleProductSearchRequestRef.current) return;
+      setSaleProducts(result);
     },
     [query],
   );
+
+  const refreshAdminProducts = useCallback(async (nextQuery = "") => {
+    const requestId = adminProductSearchRequestRef.current + 1;
+    adminProductSearchRequestRef.current = requestId;
+    const result = await searchProducts(nextQuery);
+    if (requestId !== adminProductSearchRequestRef.current) return;
+    setAdminProducts(result);
+  }, []);
 
   const refreshHeldTickets = useCallback(async () => {
     const result = await listHeldTickets();
@@ -205,7 +215,8 @@ function App() {
     getAppBootstrap()
       .then((bootstrap) => {
         setSummary(bootstrap.summary);
-        setProducts(bootstrap.products);
+        setSaleProducts(bootstrap.products);
+        setAdminProducts(bootstrap.products);
         setHeldTickets(bootstrap.held_tickets);
         setTaxEnabled(bootstrap.tax_enabled);
         setPricesIncludeTax(bootstrap.tax_prices_include_tax);
@@ -244,12 +255,28 @@ function App() {
     if (currentView === "sale") window.setTimeout(() => searchRef.current?.focus(), 40);
   }, [currentView]);
 
+  useEffect(() => {
+    if (!session) return;
+    if (!["products", "inventory", "purchases"].includes(currentView)) return;
+    refreshAdminProducts("").catch((error) => showToast(String(error)));
+  }, [currentView, refreshAdminProducts, session, showToast]);
+
   const addProduct = useCallback((product: Product, quantity = 1) => {
+    if (quantity <= 0) return;
+    const existing = cart.find((line) => line.product.id === product.id);
+    const nextQuantity = (existing?.quantity ?? 0) + quantity;
+    if (product.stock <= 0) {
+      showToast(`${product.name} sin existencia`);
+      return;
+    }
+    if (nextQuantity > product.stock) {
+      showToast(`${product.name} solo tiene ${product.stock} ${product.unit}`);
+      return;
+    }
     setCart((current) => {
-      const existing = current.find((line) => line.product.id === product.id);
       if (existing) {
         return current.map((line) =>
-          line.product.id === product.id ? { ...line, quantity: line.quantity + quantity } : line,
+          line.product.id === product.id ? { ...line, product, quantity: nextQuantity } : line,
         );
       }
       return [...current, { product, quantity, discount: 0 }];
@@ -257,15 +284,23 @@ function App() {
     setSelectedCartProductId(product.id);
     setQuery("");
     searchRef.current?.focus();
-  }, []);
+  }, [cart, showToast]);
 
   const updateLine = useCallback((productId: number, patch: Partial<Pick<CartLine, "quantity" | "discount">>) => {
     setCart((current) =>
       current
-        .map((line) => (line.product.id === productId ? { ...line, ...patch } : line))
+        .map((line) => {
+          if (line.product.id !== productId) return line;
+          const nextQuantity = patch.quantity ?? line.quantity;
+          if (nextQuantity > line.product.stock) {
+            showToast(`${line.product.name} solo tiene ${line.product.stock} ${line.product.unit}`);
+            return line;
+          }
+          return { ...line, ...patch };
+        })
         .filter((line) => line.quantity > 0),
     );
-  }, []);
+  }, [showToast]);
 
   useEffect(() => {
     setSelectedCartProductId((current) => {
@@ -277,11 +312,11 @@ function App() {
 
   const submitSearch = async (event?: FormEvent) => {
     event?.preventDefault();
-    const requestId = productSearchRequestRef.current + 1;
-    productSearchRequestRef.current = requestId;
+    const requestId = saleProductSearchRequestRef.current + 1;
+    saleProductSearchRequestRef.current = requestId;
     const result = await searchProducts(query);
-    if (requestId !== productSearchRequestRef.current) return;
-    setProducts(result);
+    if (requestId !== saleProductSearchRequestRef.current) return;
+    setSaleProducts(result);
     if (query.trim() && result.length === 1) addProduct(result[0]);
   };
 
@@ -302,10 +337,24 @@ function App() {
     }
     setBusy(true);
     try {
+      const currentProducts = await getProductsByIds(cart.map((line) => line.product.id));
+      const byId = new Map(currentProducts.map((product) => [product.id, product]));
+      const unavailableLine = cart.find((line) => !byId.has(line.product.id));
+      if (unavailableLine) {
+        showToast(`${unavailableLine.product.name} no disponible`);
+        return;
+      }
+      const syncedCart = cart.map((line) => ({ ...line, product: byId.get(line.product.id) ?? line.product }));
+      const missingStock = syncedCart.find((line) => line.product.stock <= 0 || line.quantity > line.product.stock);
+      if (missingStock) {
+        setCart(syncedCart);
+        showToast(`${missingStock.product.name} sin existencia suficiente`);
+        return;
+      }
       const receipt = await createSale({
         cashier_id: session.id,
         customer_id: null,
-        items: cart.map((line) => ({
+        items: syncedCart.map((line) => ({
           product_id: line.product.id,
           quantity: line.quantity,
           unit_price: line.product.price,
@@ -670,11 +719,11 @@ function App() {
     openDrawer: openDrawerAndRecord,
     setSelectedCartProductId,
     setQuery,
-    setProducts,
+    setProducts: setSaleProducts,
     showToast,
   });
 
-  const openCash = async (openingCash = 800) => {
+  const openCash = async (openingCash = 0) => {
     if (!session) return;
     try {
       await openCashSession(openingCash, session.id);
@@ -733,7 +782,7 @@ function App() {
           {currentView === "sale" ? (
             <SaleView
               query={query}
-              products={products}
+              products={saleProducts}
               cart={cart}
               totals={totals}
               paid={paid}
@@ -754,7 +803,7 @@ function App() {
               setCashReceived={setCashReceived}
               setCardReceived={setCardReceived}
               setTransferReceived={setTransferReceived}
-              refreshProducts={refreshProducts}
+              refreshProducts={refreshSaleProducts}
               submitSearch={submitSearch}
               addProduct={addProduct}
               updateLine={updateLine}
@@ -774,10 +823,10 @@ function App() {
             <AdminView
               view={currentView}
               session={session}
-              products={products}
+              products={adminProducts}
               summary={summary}
               openCash={openCash}
-              refreshProducts={refreshProducts}
+              refreshProducts={refreshAdminProducts}
               refreshSummary={refreshSummary}
               showToast={showToast}
               onTaxModeChange={({ enabled, pricesIncludeTax: nextPricesIncludeTax }) => {

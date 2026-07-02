@@ -1,6 +1,7 @@
 import { Archive, Percent, Printer, Scale } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Setting } from "../../components/display/SummaryCards";
+import { selectNumericInput } from "../../lib/numberInput";
 import { getSetting, listHardwareDevices, openDrawer, printTicket, readScale, setSetting } from "../../lib/posApi";
 import type { HardwareDevice } from "../../types";
 
@@ -302,7 +303,7 @@ export function SettingsView({
                 </label>
                 <label>
                   Copias
-                  <input type="number" min="1" max="4" value={ticketCopies} onChange={(event) => setTicketCopies(Number(event.target.value))} />
+                  <input type="number" min="1" max="4" value={ticketCopies} onFocus={selectNumericInput} onChange={(event) => setTicketCopies(Number(event.target.value))} />
                 </label>
                 <label className="field-span-2">
                   Encabezado
@@ -314,11 +315,11 @@ export function SettingsView({
                 </label>
                 <label>
                   Lineas iniciales
-                  <input type="number" min="0" max="8" value={ticketStartLines} onChange={(event) => setTicketStartLines(Number(event.target.value))} />
+                  <input type="number" min="0" max="8" value={ticketStartLines === 0 ? "" : ticketStartLines} onFocus={selectNumericInput} onChange={(event) => setTicketStartLines(Number(event.target.value))} />
                 </label>
                 <label>
                   Lineas al final
-                  <input type="number" min="0" max="8" value={ticketExtraLines} onChange={(event) => setTicketExtraLines(Number(event.target.value))} />
+                  <input type="number" min="0" max="8" value={ticketExtraLines === 0 ? "" : ticketExtraLines} onFocus={selectNumericInput} onChange={(event) => setTicketExtraLines(Number(event.target.value))} />
                 </label>
                 <div className="toggle-stack field-span-2">
                   <label className="toggle-row">

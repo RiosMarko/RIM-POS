@@ -1,6 +1,7 @@
 import { AlertTriangle, Banknote, ReceiptText } from "lucide-react";
 import { FormEvent, useState } from "react";
 import { money } from "../../lib/money";
+import { selectNumericInput } from "../../lib/numberInput";
 import type { SaleListItem } from "../../types";
 
 const denominations = [1000, 500, 200, 100, 50, 20, 10, 5, 2, 1, 0.5];
@@ -71,7 +72,7 @@ export function CashDialog({
   onAudit: (counted: number, denominationsJson: string, differenceReason?: string) => void | Promise<void>;
   onFinalCut: (counted: number, denominationsJson: string, differenceReason?: string) => Promise<void>;
 }) {
-  const [amount, setAmount] = useState(kind === "open" ? "800" : String(expectedCash.toFixed(2)));
+  const [amount, setAmount] = useState(kind === "open" ? "0" : String(expectedCash.toFixed(2)));
   const [reason, setReason] = useState(kind === "in" ? "Entrada a caja" : kind === "out" ? "Retiro de caja" : "");
   const [counts, setCounts] = useState<Record<string, string>>({});
   const amountValue = Number(amount.replace(",", "."));
@@ -111,7 +112,7 @@ export function CashDialog({
         <form className="dialog-form" onSubmit={submit}>
           <label>
             {kind === "open" ? "Fondo inicial" : kind === "close" || kind === "audit" ? "Efectivo contado" : "Importe"}
-            <input value={amount} onChange={(event) => setAmount(event.target.value)} inputMode="decimal" autoFocus />
+            <input value={amount} onFocus={selectNumericInput} onChange={(event) => setAmount(event.target.value)} inputMode="decimal" autoFocus />
           </label>
           {(kind === "audit" || kind === "close") && (
             <div className="denomination-grid">
@@ -120,6 +121,7 @@ export function CashDialog({
                   ${value}
                   <input
                     value={counts[String(value)] ?? ""}
+                    onFocus={selectNumericInput}
                     onChange={(event) => setCounts((current) => ({ ...current, [String(value)]: event.target.value }))}
                     inputMode="numeric"
                     placeholder="0"
@@ -192,7 +194,7 @@ export function ExpenseDialog({
           </label>
           <label>
             Importe
-            <input value={amount} onChange={(event) => setAmount(event.target.value)} inputMode="decimal" />
+            <input value={amount} onFocus={selectNumericInput} onChange={(event) => setAmount(event.target.value)} inputMode="decimal" />
           </label>
           <div className="modal-actions">
             <button className="ghost-button" type="button" onClick={onClose} disabled={busy}>Cancelar</button>

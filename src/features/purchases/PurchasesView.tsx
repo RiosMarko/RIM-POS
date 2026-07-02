@@ -1,6 +1,7 @@
 import { Trash2 } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { money, roundMoney } from "../../lib/money";
+import { selectNumericInput } from "../../lib/numberInput";
 import { createPurchase, listPurchases, listSuppliers, upsertSupplier } from "../../lib/posApi";
 import type { Product, PurchaseReceipt, Supplier, UserSession } from "../../types";
 
@@ -170,8 +171,8 @@ export function PurchasesView({
               ))}
             </select>
           </label>
-          <label>Cantidad<input type="number" min="0.001" step="0.001" value={quantity} onChange={(event) => setQuantity(Number(event.target.value))} /></label>
-          <label>Costo unitario<input type="number" min="0" step="0.01" value={unitCost} onChange={(event) => setUnitCost(Number(event.target.value))} /></label>
+          <label>Cantidad<input type="number" min="0.001" step="0.001" value={quantity} onFocus={selectNumericInput} onChange={(event) => setQuantity(Number(event.target.value))} /></label>
+          <label>Costo unitario<input type="number" min="0" step="0.01" value={unitCost === 0 ? "" : unitCost} onFocus={selectNumericInput} onChange={(event) => setUnitCost(Number(event.target.value))} /></label>
           <button className="ghost-button form-submit" type="button" disabled={!selectedProduct} onClick={addPurchaseLine}>
             Agregar partida
           </button>
@@ -189,6 +190,7 @@ export function PurchasesView({
                     min="0.001"
                     step="0.001"
                     value={line.quantity}
+                    onFocus={selectNumericInput}
                     aria-label={`Cantidad ${product?.name ?? ""}`}
                     onChange={(event) => setPurchaseLines((current) => current.map((candidate) => candidate.localId === line.localId ? { ...candidate, quantity: Number(event.target.value) } : candidate))}
                   />
@@ -196,7 +198,8 @@ export function PurchasesView({
                     type="number"
                     min="0"
                     step="0.01"
-                    value={line.unitCost}
+                    value={line.unitCost === 0 ? "" : line.unitCost}
+                    onFocus={selectNumericInput}
                     aria-label={`Costo ${product?.name ?? ""}`}
                     onChange={(event) => setPurchaseLines((current) => current.map((candidate) => candidate.localId === line.localId ? { ...candidate, unitCost: Number(event.target.value) } : candidate))}
                   />

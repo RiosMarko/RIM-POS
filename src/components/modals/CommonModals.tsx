@@ -1,5 +1,6 @@
 import { FormEvent, useState } from "react";
 import { AlertTriangle, Info, Percent } from "lucide-react";
+import { selectNumericInput } from "../../lib/numberInput";
 
 export type ConfirmDraft = {
   title: string;
@@ -78,7 +79,7 @@ export function NumberPromptModal({
         }}>
           <label>
             {draft.label}
-            <input value={value} onChange={(event) => setValue(event.target.value)} inputMode="decimal" autoFocus />
+            <input value={value} onFocus={selectNumericInput} onChange={(event) => setValue(event.target.value)} inputMode="decimal" autoFocus />
           </label>
           <div className="modal-actions">
             <button className="ghost-button" type="button" onClick={onCancel}>Cancelar</button>

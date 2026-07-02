@@ -163,9 +163,9 @@ let mockCashSession: CashSession | null = {
   opened_by: 1,
   opened_at: new Date().toISOString(),
   closed_at: null,
-  opening_cash: 800,
+  opening_cash: 0,
   closing_cash: null,
-  expected_cash: 800,
+  expected_cash: 0,
   sales_total: 0,
   status: "open",
 };

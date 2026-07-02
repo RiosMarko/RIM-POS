@@ -14,7 +14,7 @@ export const functionKeys = [
   { key: "F8", label: "Gasto" },
   { key: "F9", label: "Pago" },
   { key: "F10", label: "Cajon" },
-  { key: "F11", label: "Corte Ctrl+K", compactLabel: true },
+  { key: "F11", label: "Corte", compactLabel: true },
   { key: "F12", label: "Admin" },
 ];
 
