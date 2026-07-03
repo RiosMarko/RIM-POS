@@ -85,7 +85,7 @@ export function CashDialog({
   const diff = Number.isFinite(countedValue) ? countedValue - expectedCash : 0;
   const needsReason = kind === "in" || kind === "out";
   const needsDifferenceReason = (kind === "audit" || kind === "close") && Math.round(diff * 100) !== 0;
-  const title = kind === "open" ? "Abrir caja" : kind === "in" ? "Entrada de efectivo" : kind === "out" ? "Retiro de efectivo" : kind === "audit" ? "Arqueo de caja" : "Corte del dia";
+  const title = kind === "open" ? "Abrir caja" : kind === "in" ? "Entrada de efectivo" : kind === "out" ? "Retiro de efectivo" : kind === "audit" ? "Arqueo de caja" : "Corte turno";
   const denominationsJson = JSON.stringify(denominations.map((value) => ({
     denomination: value,
     quantity: Number(counts[String(value)]) || 0,

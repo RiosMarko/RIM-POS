@@ -239,7 +239,7 @@ export function CashView({
           title="Corte Z: cierre final del turno, cierra caja"
           onClick={() => setCashDialog("close")}
         >
-          Corte del dia
+          Corte turno
         </button>
         <button
           className="ghost-button"
@@ -461,7 +461,7 @@ export function CashView({
           <h3>Cortes</h3>
           {cuts.map((cut) => (
             <div className="kardex-row" key={cut.shift_id}>
-              <strong title={cut.status === "closed" ? "Corte Z" : "Corte X"}>{cut.status === "closed" ? "Corte del dia" : "Corte cajero"} #{cut.shift_id}</strong>
+              <strong title={cut.status === "closed" ? "Corte Z" : "Corte X"}>{cut.status === "closed" ? "Corte turno" : "Corte cajero"} #{cut.shift_id}</strong>
               <span>{money(cut.net_sales)} · dif {money(cut.cash_difference ?? 0)}</span>
               <button className="ghost-button mini" type="button" onClick={() => printShiftCut(cut.shift_id).then((result) => showToast(result.message)).catch((error) => showToast(String(error)))}>
                 Reimprimir
