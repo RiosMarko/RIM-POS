@@ -16,7 +16,7 @@ export function InventoryView({
   showToast,
 }: {
   products: Product[];
-  refreshProducts: (query?: string, options?: ProductSearchOptions) => Promise<void>;
+  refreshProducts: (query?: string, options?: ProductSearchOptions) => Promise<Product[]>;
   showToast: (message: string) => void;
 }) {
   const [adjustmentProduct, setAdjustmentProduct] = useState<Product | null>(null);

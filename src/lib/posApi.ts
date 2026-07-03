@@ -364,9 +364,27 @@ export async function bulkImportProducts(rows: ProductImportRow[]): Promise<Prod
   return { imported: created + updated, created, updated, failed: 0, committed: true, issues: [] };
 }
 
-export async function deleteProduct(id: number): Promise<void> {
+export async function validateProductImport(rows: ProductImportRow[]): Promise<ProductImportResult> {
   if (isTauri()) {
-    return call<void>("product_delete", { actorId: requireActorId(), id });
+    return call<ProductImportResult>("product_bulk_validate", { actorId: requireActorId(), rows });
+  }
+  const issues: ProductImportResult["issues"] = [];
+  const seenBarcodes = new Set<string>();
+  for (const row of rows) {
+    const barcode = row.barcode.trim();
+    if (!barcode) issues.push({ row_number: row.row_number, sku: row.sku, barcode, message: "Codigo requerido" });
+    if (seenBarcodes.has(barcode)) issues.push({ row_number: row.row_number, sku: row.sku, barcode, message: "Codigo duplicado en archivo" });
+    seenBarcodes.add(barcode);
+    if (demoProducts.some((product) => product.barcode === barcode || product.sku.toLowerCase() === barcode.toLowerCase())) {
+      issues.push({ row_number: row.row_number, sku: row.sku, barcode, message: "Codigo ya existe en catalogo" });
+    }
+  }
+  return { imported: 0, created: rows.length - issues.length, updated: 0, failed: issues.length, committed: false, issues };
+}
+
+export async function deleteProduct(id: number, actorId?: number): Promise<void> {
+  if (isTauri()) {
+    return call<void>("product_delete", { actorId: actorId ?? requireActorId(), id });
   }
   demoProducts = demoProducts.map((product) => (product.id === id ? { ...product, active: false } : product));
 }
@@ -407,7 +425,7 @@ export async function login(input: { name: string; pin: string }): Promise<UserS
   }
   const user = mockUsers.find((candidate) => candidate.name.toLowerCase() === input.name.trim().toLowerCase() && candidate.active);
   if (!user || mockPins.get(user.name.toLowerCase()) !== input.pin.trim()) {
-    throw new Error("Usuario o PIN incorrecto");
+    throw new Error("Usuario o contraseña incorrectos");
   }
   return { id: user.id, name: user.name, role: user.role, permissions: user.permissions };
 }
@@ -444,7 +462,7 @@ export async function createUser(input: {
     return call<UserAccount>("user_create", { actorId: requireActorId(), input });
   }
   if (input.name.trim().length < 2) throw new Error("Nombre muy corto");
-  if (input.pin.trim().length < 4) throw new Error("PIN minimo de 4 digitos");
+  if (input.pin.trim().length < 4) throw new Error("Contraseña minimo de 4 caracteres");
   if (mockUsers.some((user) => user.name.toLowerCase() === input.name.trim().toLowerCase())) {
     throw new Error("Ya existe usuario con ese nombre");
   }
@@ -475,7 +493,7 @@ export async function updateUser(input: {
   }
   const name = input.name.trim();
   if (name.length < 2) throw new Error("Nombre muy corto");
-  if (input.pin && input.pin.trim().length < 4) throw new Error("PIN minimo de 4 digitos");
+  if (input.pin && input.pin.trim().length < 4) throw new Error("Contraseña minimo de 4 caracteres");
   if (mockUsers.some((user) => user.id !== input.id && user.name.toLowerCase() === name.toLowerCase())) {
     throw new Error("Ya existe usuario con ese nombre");
   }
@@ -1241,6 +1259,25 @@ export async function getProductSalesReport(filters?: { fromDate?: string; toDat
   }));
 }
 
+export async function getUnsoldProductsReport(filters?: { fromDate?: string; toDate?: string }): Promise<ProductSalesReport[]> {
+  if (isTauri()) {
+    return call<ProductSalesReport[]>("report_unsold_products", {
+      actorId: requireActorId(),
+      limit: 100,
+      fromDate: filters?.fromDate ?? null,
+      toDate: filters?.toDate ?? null,
+    });
+  }
+  return demoProducts.slice(0, 6).map((product) => ({
+    product_id: product.id,
+    product_name: product.name,
+    category: product.category,
+    quantity: 0,
+    total: 0,
+    gross_profit: 0,
+  }));
+}
+
 export async function getTaxBreakdown(filters?: { fromDate?: string; toDate?: string }): Promise<TaxBreakdown[]> {
   if (isTauri()) {
     return call<TaxBreakdown[]>("report_tax_breakdown", {
@@ -1353,6 +1390,13 @@ export async function createBackup(): Promise<BackupResult> {
   return { path: "Mock: navegador no escribe backup SQLite", created_at: new Date().toISOString() };
 }
 
+export async function exportBackupToDesktop(): Promise<BackupResult> {
+  if (isTauri()) {
+    return call<BackupResult>("backup_export_desktop", { actorId: requireActorId() });
+  }
+  return { path: "Mock: Escritorio/RIM-POS-backups", created_at: new Date().toISOString() };
+}
+
 export async function listBackups(): Promise<BackupFile[]> {
   if (isTauri()) {
     return call<BackupFile[]>("backup_list", { actorId: requireActorId() });
@@ -1360,9 +1404,9 @@ export async function listBackups(): Promise<BackupFile[]> {
   return [];
 }
 
-export async function restoreBackup(path: string): Promise<BackupRestoreResult> {
+export async function restoreBackup(path: string, actorId?: number): Promise<BackupRestoreResult> {
   if (isTauri()) {
-    return call<BackupRestoreResult>("backup_restore", { actorId: requireActorId(), path });
+    return call<BackupRestoreResult>("backup_restore", { actorId: actorId ?? requireActorId(), path });
   }
   return {
     restored_path: path,

@@ -1,6 +1,6 @@
 use chrono::{DateTime, Duration, Utc};
 
-pub const AUTO_BACKUP_INTERVAL_HOURS: i64 = 48;
+pub const AUTO_BACKUP_INTERVAL_HOURS: i64 = 24;
 
 pub fn now_iso() -> String {
     Utc::now().to_rfc3339()

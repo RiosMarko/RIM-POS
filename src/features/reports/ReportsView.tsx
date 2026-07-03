@@ -17,8 +17,9 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import { downloadCsv } from "../../lib/csv";
+import { formatDateMx, formatDateTimeMx } from "../../lib/date";
 import { money } from "../../lib/money";
-import { getMonthlySalesReport, getProductSalesReport, getTaxBreakdown, listReportMovements } from "../../lib/posApi";
+import { getMonthlySalesReport, getProductSalesReport, getTaxBreakdown, getUnsoldProductsReport, listReportMovements } from "../../lib/posApi";
 import type { MonthlySalesReport, ProductSalesReport, ReportMovement, TaxBreakdown } from "../../types";
 
 type ReportTab = "today" | "movements" | "products" | "cuts" | "monthly";
@@ -72,13 +73,13 @@ function monthRange(monthKey: string) {
 }
 
 function shortDateLabel(date: Date) {
-  return date.toLocaleDateString("es-MX", { day: "2-digit", month: "2-digit" });
+  return formatDateMx(date);
 }
 
 function reportDateLabel(value: string) {
   const date = parseDateKey(value);
   if (!date) return "Inicio";
-  return date.toLocaleDateString("es-MX", { day: "2-digit", month: "short", year: "numeric" }).replace(".", "").toUpperCase();
+  return formatDateMx(date);
 }
 
 function movementTone(movement: ReportMovement) {
@@ -132,6 +133,7 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
   const todayKey = dateKey(new Date());
   const monthStartKey = dateKey(new Date(new Date().getFullYear(), new Date().getMonth(), 1));
   const [products, setProducts] = useState<ProductSalesReport[]>([]);
+  const [unsoldProducts, setUnsoldProducts] = useState<ProductSalesReport[]>([]);
   const [movements, setMovements] = useState<ReportMovement[]>([]);
   const [monthly, setMonthly] = useState<MonthlySalesReport[]>([]);
   const [taxBreakdown, setTaxBreakdown] = useState<TaxBreakdown[]>([]);
@@ -145,13 +147,15 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
 
   const refresh = useCallback(async () => {
     const range = { fromDate: fromDate || undefined, toDate: toDate || undefined };
-    const [nextProducts, nextMovements, nextMonthly, nextTaxBreakdown] = await Promise.all([
+    const [nextProducts, nextUnsoldProducts, nextMovements, nextMonthly, nextTaxBreakdown] = await Promise.all([
       getProductSalesReport(range),
+      getUnsoldProductsReport(range),
       listReportMovements(range),
       getMonthlySalesReport(),
       getTaxBreakdown(range),
     ]);
     setProducts(nextProducts);
+    setUnsoldProducts(nextUnsoldProducts);
     setMovements(nextMovements);
     setMonthly(nextMonthly);
     setTaxBreakdown(nextTaxBreakdown);
@@ -298,9 +302,7 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
         key: `${startKey}:${endKey}`,
         startKey,
         endKey,
-        label: bucketSize === 1
-          ? bucketStart.toLocaleDateString("es-MX", { weekday: "short" })
-          : `${shortDateLabel(bucketStart)}-${shortDateLabel(cappedEnd)}`,
+        label: bucketSize === 1 ? shortDateLabel(bucketStart) : `${shortDateLabel(bucketStart)}-${shortDateLabel(cappedEnd)}`,
         total: 0,
         profit: 0,
       };
@@ -600,6 +602,21 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
                   <strong>{money(product.total)}</strong>
                 </div>
               ))}
+              <div className="report-panel-title">
+                <h3>Productos sin venta</h3>
+                <span>En este periodo</span>
+              </div>
+              {unsoldProducts.length === 0 ? (
+                <div className="table-empty">Todos tuvieron venta en el periodo</div>
+              ) : unsoldProducts.map((product) => (
+                <div className="product-report-row" key={`unsold-${product.product_id}`}>
+                  <div>
+                    <strong>{product.product_name}</strong>
+                    <span>{product.category || "- Sin Departamento -"}</span>
+                  </div>
+                  <strong>{money(0)}</strong>
+                </div>
+              ))}
             </div>
           ) : activeTab === "monthly" ? (
             <div className="report-panel product-report-panel">
@@ -639,7 +656,7 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
                       <strong>{movement.title}</strong>
                       <span>{movement.detail}</span>
                       <small>
-                        {new Date(movement.created_at).toLocaleString("es-MX", { dateStyle: "short", timeStyle: "short" })}
+                        {formatDateTimeMx(movement.created_at)}
                         {" · "}
                         {movement.cash_session_id ? `Caja ${movement.cash_session_id}` : "General"}
                         {" · "}

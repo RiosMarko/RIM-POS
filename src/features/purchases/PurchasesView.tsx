@@ -1,5 +1,6 @@
 import { Trash2 } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { formatDateTimeMx } from "../../lib/date";
 import { money, roundMoney } from "../../lib/money";
 import { selectNumericInput } from "../../lib/numberInput";
 import { createPurchase, listPurchases, listSuppliers, upsertSupplier } from "../../lib/posApi";
@@ -20,7 +21,7 @@ export function PurchasesView({
 }: {
   session: UserSession;
   products: Product[];
-  refreshProducts: (query?: string) => Promise<void>;
+  refreshProducts: (query?: string) => Promise<Product[]>;
   showToast: (message: string) => void;
 }) {
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
@@ -97,7 +98,7 @@ export function PurchasesView({
     }
     setSavingPurchase(true);
     try {
-      const batch = `Compra lote ${new Date().toLocaleString("es-MX")}`;
+      const batch = `Compra lote ${formatDateTimeMx(new Date())}`;
       const receipts = [];
       for (const line of purchaseLines) {
         receipts.push(await createPurchase({

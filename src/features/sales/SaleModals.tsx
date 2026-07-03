@@ -1,5 +1,6 @@
 import { Archive, Ticket, Trash2 } from "lucide-react";
 import { FormEvent, useEffect, useRef, useState } from "react";
+import { formatDateTimeMx } from "../../lib/date";
 import { money } from "../../lib/money";
 import type { ActiveSaleDraft, HeldTicket } from "../../types";
 
@@ -223,7 +224,7 @@ export function RecoveryDraftModal({
           </div>
           <div>
             <span>Guardado</span>
-            <strong>{new Date(draft.updated_at).toLocaleString("es-MX", { dateStyle: "short", timeStyle: "short" })}</strong>
+            <strong>{formatDateTimeMx(draft.updated_at)}</strong>
           </div>
         </div>
         <div className="modal-actions">

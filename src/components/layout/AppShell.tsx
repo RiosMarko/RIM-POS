@@ -1,6 +1,7 @@
 import { LockKeyhole, LogOut, ShoppingCart } from "lucide-react";
 import type { ReactNode } from "react";
 import rimPosLogo from "../../assets/rim-pos-icon.png";
+import { formatLongDateMx } from "../../lib/date";
 import { money } from "../../lib/money";
 import { hasPermission } from "../../navigation";
 import type { NavItem, ViewKey } from "../../navigation";
@@ -66,9 +67,7 @@ export function AppShell({
           </nav>
 
           <div className="operator-panel">
-            <span>{session.role === "admin" ? "Administrador" : "Cajero"}</span>
             <strong>{session.name}</strong>
-            <small>{new Date().toLocaleDateString("es-MX")}</small>
             <button className="logout-button" type="button" onClick={logout}>
               <LogOut size={16} />
               Salir
@@ -90,7 +89,7 @@ export function AppShell({
           {children}
 
           <footer className="status-clock" aria-live="polite">
-            <span>{clock.toLocaleDateString("es-MX", { weekday: "long", day: "2-digit", month: "long", year: "numeric" })}</span>
+            <span>{formatLongDateMx(clock)}</span>
             <strong>{clock.toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</strong>
           </footer>
         </main>

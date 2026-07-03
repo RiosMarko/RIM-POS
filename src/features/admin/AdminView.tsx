@@ -46,7 +46,7 @@ export function AdminView({
   products: Product[];
   summary: DashboardSummary | null;
   openCash: (openingCash?: number) => void;
-  refreshProducts: (query?: string, options?: ProductSearchOptions) => Promise<void>;
+  refreshProducts: (query?: string, options?: ProductSearchOptions) => Promise<Product[]>;
   refreshSummary: () => Promise<void>;
   showToast: (message: string) => void;
   onTaxModeChange: (mode: { enabled: boolean; pricesIncludeTax: boolean }) => void;

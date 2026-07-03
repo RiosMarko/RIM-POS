@@ -42,7 +42,7 @@ export function LoginScreen({
           <div>
             <span>RIM-POS</span>
             <h1>{setupRequired ? "Crear admin" : "Entrar a caja"}</h1>
-            <p>{setupRequired ? "Primer arranque: crea usuario administrador." : "Selecciona usuario, escribe PIN y empieza a vender."}</p>
+            <p>{setupRequired ? "Primer arranque: crea usuario administrador." : "Selecciona usuario, escribe contraseña y empieza a vender."}</p>
           </div>
         </div>
         <form className="login-form" onSubmit={submit}>
@@ -51,8 +51,8 @@ export function LoginScreen({
             <input value={name} onChange={(event) => setName(event.target.value)} autoFocus />
           </label>
           <label>
-            PIN
-            <input value={pin} onChange={(event) => setPin(event.target.value)} type="password" inputMode="numeric" />
+            Contraseña
+            <input value={pin} onChange={(event) => setPin(event.target.value)} type="password" autoComplete="current-password" />
           </label>
           <button className="pay-button" type="submit" disabled={busy}>
             <LockKeyhole size={22} />
@@ -108,7 +108,7 @@ export function AdminGate({
           <LockKeyhole size={22} />
           <div>
             <h2>Acceso admin</h2>
-            <p>Para entrar a {targetLabel}, escribe usuario y PIN de administrador.</p>
+            <p>Para entrar a {targetLabel}, escribe usuario y contraseña de administrador.</p>
           </div>
         </div>
         <form className="login-form compact" onSubmit={submit}>
@@ -117,8 +117,8 @@ export function AdminGate({
             <input value={name} onChange={(event) => setName(event.target.value)} autoFocus />
           </label>
           <label>
-            PIN
-            <input value={pin} onChange={(event) => setPin(event.target.value)} type="password" inputMode="numeric" />
+            Contraseña
+            <input value={pin} onChange={(event) => setPin(event.target.value)} type="password" autoComplete="current-password" />
           </label>
           <div className="modal-actions">
             <button className="ghost-button" type="button" onClick={onCancel}>

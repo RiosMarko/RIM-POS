@@ -1,13 +1,18 @@
 import { DatabaseBackup, RotateCcw, ShieldCheck } from "lucide-react";
 import { useEffect, useState } from "react";
 import { WindowTransitionCover } from "../../components/window/WindowChrome";
-import { createBackup, listBackups, restoreBackup } from "../../lib/posApi";
+import { AdminGate } from "../auth/AuthScreens";
+import { formatDateMx, formatDateTimeMx, formatTimeMx } from "../../lib/date";
+import { createBackup, exportBackupToDesktop, listBackups, restoreBackup } from "../../lib/posApi";
 import type { BackupFile } from "../../types";
 
 export function AdministrationView({ showToast }: { showToast: (message: string) => void }) {
   const [backups, setBackups] = useState<BackupFile[]>([]);
   const [restoreDraft, setRestoreDraft] = useState<BackupFile | null>(null);
+  const [restoreAdminDraft, setRestoreAdminDraft] = useState<BackupFile | null>(null);
   const [restoringPath, setRestoringPath] = useState("");
+  const latestBackup = backups[0] ?? null;
+  const latestBackupAgeHours = latestBackup ? (Date.now() - new Date(latestBackup.created_at).getTime()) / 36e5 : null;
 
   const refreshBackups = async () => {
     setBackups(await listBackups());
@@ -27,10 +32,20 @@ export function AdministrationView({ showToast }: { showToast: (message: string)
     }
   };
 
-  const restore = async (backupFile: BackupFile) => {
+  const exportBackup = async () => {
+    try {
+      const result = await exportBackupToDesktop();
+      await refreshBackups();
+      showToast(`Backup exportado: ${result.path}`);
+    } catch (error) {
+      showToast(String(error));
+    }
+  };
+
+  const restore = async (backupFile: BackupFile, actorId?: number) => {
     setRestoringPath(backupFile.path);
     try {
-      const result = await restoreBackup(backupFile.path);
+      const result = await restoreBackup(backupFile.path, actorId);
       setRestoreDraft(null);
       await refreshBackups();
       window.localStorage.setItem("rim-pos-post-restore-message", "Backup Restablecido");
@@ -51,16 +66,27 @@ export function AdministrationView({ showToast }: { showToast: (message: string)
             <h2>Administracion</h2>
             <p>Backups y restauracion del sistema.</p>
           </div>
-          <button className="primary-button" type="button" onClick={backup}>
-            <DatabaseBackup size={18} />
-            Crear backup
-          </button>
+          <div className="toolbar-actions">
+            <button className="ghost-button" type="button" onClick={exportBackup}>
+              <DatabaseBackup size={18} />
+              Exportar backup
+            </button>
+            <button className="primary-button" type="button" onClick={backup}>
+              <DatabaseBackup size={18} />
+              Crear backup
+            </button>
+          </div>
         </div>
         <div className="admin-safety-strip">
           <ShieldCheck size={22} />
           <div>
-            <strong>Restauracion protegida</strong>
-            <span>Antes de cargar un backup, RIM-POS guarda copia del estado actual.</span>
+            <strong>{latestBackupAgeHours != null && latestBackupAgeHours <= 24 ? "Backups al dia" : "Backup recomendado"}</strong>
+            <span>
+              {latestBackup
+                ? `Ultimo: ${formatDateTimeMx(latestBackup.created_at)} · ${Math.round(latestBackup.size_bytes / 1024)} KB`
+                : "Sin backup creado. Crea uno antes de operar en tienda."}
+            </span>
+            {latestBackup && <small>{latestBackup.path}</small>}
           </div>
         </div>
         <div className="device-list">
@@ -75,9 +101,13 @@ export function AdministrationView({ showToast }: { showToast: (message: string)
             <p className="muted-copy">Sin backups todavia.</p>
           ) : backups.map((backupFile) => (
             <div className="backup-row" key={backupFile.path}>
-              <div>
-                <strong>{new Date(backupFile.created_at).toLocaleString()}</strong>
-                <span>{Math.round(backupFile.size_bytes / 1024)} KB</span>
+              <div className="backup-row-main">
+                <strong>{formatDateMx(backupFile.created_at)}</strong>
+                <div className="backup-meta">
+                  <span>{formatTimeMx(backupFile.created_at)}</span>
+                  <span>{Math.round(backupFile.size_bytes / 1024)} KB</span>
+                </div>
+                <small>{backupFile.name}</small>
               </div>
               <button
                 className="ghost-button mini"
@@ -104,7 +134,7 @@ export function AdministrationView({ showToast }: { showToast: (message: string)
               </div>
             </div>
             <div className="restore-summary">
-              <strong>{new Date(restoreDraft.created_at).toLocaleString()}</strong>
+              <strong>{formatDateTimeMx(restoreDraft.created_at)}</strong>
               <span>{Math.round(restoreDraft.size_bytes / 1024)} KB</span>
               <small>Antes de restaurar se guarda copia del estado actual.</small>
             </div>
@@ -115,7 +145,7 @@ export function AdministrationView({ showToast }: { showToast: (message: string)
               <button
                 className="danger-button"
                 type="button"
-                onClick={() => restore(restoreDraft)}
+                onClick={() => setRestoreAdminDraft(restoreDraft)}
                 disabled={Boolean(restoringPath)}
               >
                 {restoringPath ? "Restaurando" : "Restaurar backup"}
@@ -129,6 +159,18 @@ export function AdministrationView({ showToast }: { showToast: (message: string)
           phase="cover"
           title="Restaurando backup"
           detail="Cargando datos guardados"
+        />
+      )}
+      {restoreAdminDraft && (
+        <AdminGate
+          targetLabel="restaurar backup"
+          onCancel={() => setRestoreAdminDraft(null)}
+          onSuccess={(adminSession) => {
+            const backupFile = restoreAdminDraft;
+            setRestoreAdminDraft(null);
+            restore(backupFile, adminSession.id);
+          }}
+          showToast={showToast}
         />
       )}
     </section>

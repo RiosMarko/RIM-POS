@@ -1,6 +1,8 @@
 use crate::core::now_iso;
+use chrono::{DateTime, Datelike, Utc};
 use rusqlite::Connection;
 use serde::Serialize;
+use std::collections::HashSet;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -8,7 +10,9 @@ use std::path::PathBuf;
 
 type CommandResult<T> = Result<T, String>;
 
-const BACKUP_RETENTION_LIMIT: usize = 10;
+const BACKUP_KEEP_DAILY: usize = 14;
+const BACKUP_KEEP_WEEKLY: usize = 8;
+const BACKUP_KEEP_MONTHLY: usize = 12;
 
 #[derive(Debug, Serialize)]
 pub struct BackupResult {
@@ -35,18 +39,54 @@ fn prune_old_backups(backup_dir: &PathBuf) -> CommandResult<()> {
             let file_name = path.file_name()?.to_string_lossy();
             let is_backup = file_name.starts_with("pos-backup-") && file_name.ends_with(".sqlite3");
             if path.is_file() && is_backup {
-                Some(path)
+                let modified = entry
+                    .metadata()
+                    .ok()
+                    .and_then(|metadata| metadata.modified().ok())
+                    .map(DateTime::<Utc>::from)?;
+                Some((path, modified))
             } else {
                 None
             }
         })
         .collect::<Vec<_>>();
-    backups.sort();
-    let remove_count = backups.len().saturating_sub(BACKUP_RETENTION_LIMIT);
-    for path in backups.into_iter().take(remove_count) {
+    backups.sort_by(|left, right| right.1.cmp(&left.1));
+    let mut keep = HashSet::new();
+    for (path, _) in backups.iter().take(BACKUP_KEEP_DAILY) {
+        keep.insert(path.clone());
+    }
+    let mut weekly = HashSet::new();
+    let mut monthly = HashSet::new();
+    for (path, created_at) in &backups {
+        let iso_week = created_at.iso_week();
+        let week_key = format!("{}-{:02}", iso_week.year(), iso_week.week());
+        if weekly.len() < BACKUP_KEEP_WEEKLY && weekly.insert(week_key) {
+            keep.insert(path.clone());
+        }
+        let month_key = format!("{}-{:02}", created_at.year(), created_at.month());
+        if monthly.len() < BACKUP_KEEP_MONTHLY && monthly.insert(month_key) {
+            keep.insert(path.clone());
+        }
+    }
+    for (path, _) in backups {
+        if keep.contains(&path) {
+            continue;
+        }
         fs::remove_file(path).map_err(|error| error.to_string())?;
     }
     Ok(())
+}
+
+fn verify_sqlite_backup(path: &PathBuf) -> CommandResult<()> {
+    let conn = Connection::open(path).map_err(|error| format!("Backup no abre: {error}"))?;
+    let integrity: String = conn
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(|error| format!("Backup no se pudo validar: {error}"))?;
+    if integrity == "ok" {
+        Ok(())
+    } else {
+        Err(format!("Backup dañado: {integrity}"))
+    }
 }
 
 fn create_backup_file(db_path: &PathBuf) -> CommandResult<BackupResult> {
@@ -61,6 +101,7 @@ fn create_backup_file(db_path: &PathBuf) -> CommandResult<BackupResult> {
     let backup_path = backup_dir.join(format!("pos-backup-{safe_stamp}.sqlite3"));
     fs::copy(db_path, &backup_path).map_err(|error| error.to_string())?;
     harden_backup_permissions(&backup_path, 0o600)?;
+    verify_sqlite_backup(&backup_path)?;
     prune_old_backups(&backup_dir)?;
     Ok(BackupResult {
         path: backup_path.to_string_lossy().to_string(),

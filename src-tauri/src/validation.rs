@@ -1,13 +1,17 @@
 pub fn validate_pin(pin: &str, min_len: usize, label: &str) -> Result<(), String> {
     let trimmed = pin.trim();
+    let min_len = min_len.max(4);
     if trimmed.len() < min_len {
-        return Err(format!("{label} minimo de {min_len} digitos"));
+        return Err(format!("{label} minimo de {min_len} caracteres"));
     }
-    if trimmed.len() > 12 {
-        return Err(format!("{label} maximo de 12 digitos"));
+    if trimmed.len() > 64 {
+        return Err(format!("{label} maximo de 64 caracteres"));
     }
-    if !trimmed.chars().all(|char| char.is_ascii_digit()) {
-        return Err(format!("{label} solo acepta digitos"));
+    if trimmed.chars().any(char::is_whitespace) {
+        return Err(format!("{label} no debe tener espacios"));
+    }
+    if !trimmed.chars().all(|char| char.is_ascii_graphic()) {
+        return Err(format!("{label} contiene caracteres invalidos"));
     }
     Ok(())
 }

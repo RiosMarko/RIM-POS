@@ -2,6 +2,8 @@ import { BarChart3, Banknote, CalendarDays, FileText, Printer, ShoppingCart } fr
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Metric } from "../../components/display/SummaryCards";
 import type { ConfirmDraft } from "../../components/modals/CommonModals";
+import { AdminGate } from "../auth/AuthScreens";
+import { formatDateMx, formatTimeMx } from "../../lib/date";
 import { money } from "../../lib/money";
 import {
   cancelSale,
@@ -49,6 +51,7 @@ export function CashView({
   const [cutSnapshot, setCutSnapshot] = useState<ShiftCutSnapshot | null>(null);
   const [dailyCut, setDailyCut] = useState<DailyCutSummary | null>(null);
   const [cancelDraft, setCancelDraft] = useState<SaleListItem | null>(null);
+  const [cancelAdminDraft, setCancelAdminDraft] = useState<{ sale: SaleListItem; reason: string } | null>(null);
   const paidSales = useMemo(() => sales.filter((sale) => sale.status === "paid"), [sales]);
   const cashSales = useMemo(() => paidSales.reduce((sum, sale) => sum + (sale.cash_paid ?? 0), 0), [paidSales]);
   const cardSales = useMemo(() => paidSales.reduce((sum, sale) => sum + (sale.card_paid ?? 0), 0), [paidSales]);
@@ -114,10 +117,10 @@ export function CashView({
     }
   };
 
-  const cancel = async (sale: SaleListItem, reason: string) => {
+  const cancel = async (sale: SaleListItem, reason: string, actorId = session.id) => {
     if (!reason) return;
     try {
-      await cancelSale({ sale_id: sale.id, actor_id: session.id, reason });
+      await cancelSale({ sale_id: sale.id, actor_id: actorId, reason });
       await refreshSummary();
       await refresh();
       setCancelDraft(null);
@@ -125,6 +128,11 @@ export function CashView({
     } catch (error) {
       showToast(String(error));
     }
+  };
+
+  const requestCancelWithAdmin = async (sale: SaleListItem, reason: string) => {
+    if (!reason) return;
+    setCancelAdminDraft({ sale, reason });
   };
 
   const cashAudit = async (counted: number, denominationsJson: string, differenceReason?: string) => {
@@ -247,7 +255,7 @@ export function CashView({
           <div className="cut-detail-head">
             <div>
               <span className="cut-status-pill">Resumen final del dia</span>
-              <h2>Corte general {new Date(`${dailyCut.date}T00:00:00`).toLocaleDateString("es-MX", { day: "2-digit", month: "short", year: "numeric" })}</h2>
+              <h2>Corte general {formatDateMx(`${dailyCut.date}T00:00:00`)}</h2>
               <p>{dailyCut.cut_count} turnos cerrados, no modifica cajas ni ventas.</p>
             </div>
             <button
@@ -328,11 +336,11 @@ export function CashView({
               <span className="cut-status-pill">{cutStatusLabel}</span>
               <h2>Corte de {cutOwner}</h2>
               <p>
-                {new Date(cutStarted).toLocaleDateString("es-MX", { day: "2-digit", month: "short", year: "numeric" })}
+                {formatDateMx(cutStarted)}
                 {" de "}
-                {new Date(cutStarted).toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit" })}
+                {formatTimeMx(cutStarted)}
                 {" a "}
-                {new Date(cutEnded).toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit" })}
+                {formatTimeMx(cutEnded)}
                 {cutSnapshot.closed_by_name ? `, cerrado por ${cutSnapshot.closed_by_name}` : ", turno actual"}
               </p>
             </div>
@@ -400,7 +408,7 @@ export function CashView({
               {outMovements.length === 0 ? (
                 <span className="muted-note">No hubo salidas</span>
               ) : outMovements.slice(0, 8).map((movement) => (
-                <div className="cut-line" key={movement.id}><span>{new Date(movement.created_at).toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit" })} {movement.reason}</span><strong>{money(movement.amount)}</strong></div>
+                <div className="cut-line" key={movement.id}><span>{formatDateMx(movement.created_at)} {formatTimeMx(movement.created_at)} {movement.reason}</span><strong>{money(movement.amount)}</strong></div>
               ))}
               <h3>Resumen</h3>
               <div className="cut-line"><span>Tickets</span><strong>{cutSnapshot.total_tickets}</strong></div>
@@ -491,7 +499,19 @@ export function CashView({
         <SaleCancelModal
           sale={cancelDraft}
           onClose={() => setCancelDraft(null)}
-          onConfirm={(reason) => cancel(cancelDraft, reason)}
+          onConfirm={(reason) => requestCancelWithAdmin(cancelDraft, reason)}
+        />
+      )}
+      {cancelAdminDraft && (
+        <AdminGate
+          targetLabel="cancelar venta"
+          onCancel={() => setCancelAdminDraft(null)}
+          onSuccess={(adminSession) => {
+            const draft = cancelAdminDraft;
+            setCancelAdminDraft(null);
+            cancel(draft.sale, draft.reason, adminSession.id);
+          }}
+          showToast={showToast}
         />
       )}
     </section>

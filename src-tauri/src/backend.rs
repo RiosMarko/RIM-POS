@@ -21,7 +21,7 @@ use crate::validation::{
 use chrono::{Duration, Utc};
 use rusqlite::{params, params_from_iter, types::Type, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -725,6 +725,40 @@ fn hydrate_product_taxes(conn: &Connection, product: &mut Product) -> CommandRes
     Ok(())
 }
 
+fn hydrate_products_taxes(conn: &Connection, products: &mut [Product]) -> CommandResult<()> {
+    if products.is_empty() {
+        return Ok(());
+    }
+    let mut tax_ids_by_product: HashMap<i64, Vec<i64>> =
+        HashMap::with_capacity(products.len());
+    for chunk in products.chunks(900) {
+        let placeholders = std::iter::repeat("?")
+            .take(chunk.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT product_id, tax_id
+             FROM product_taxes
+             WHERE product_id IN ({placeholders})
+             ORDER BY product_id, tax_id"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map(params_from_iter(chunk.iter().map(|product| product.id)), |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(|error| error.to_string())?;
+        for row in rows {
+            let (product_id, tax_id) = row.map_err(|error| error.to_string())?;
+            tax_ids_by_product.entry(product_id).or_default().push(tax_id);
+        }
+    }
+    for product in products {
+        product.tax_ids = tax_ids_by_product.remove(&product.id).unwrap_or_default();
+    }
+    Ok(())
+}
+
 fn tax_rate_for_ids(conn: &Connection, tax_ids: &[i64], fallback: f64) -> CommandResult<f64> {
     if tax_ids.is_empty() {
         return Ok(fallback.max(0.0));
@@ -989,7 +1023,14 @@ fn init_db(app: &AppHandle) -> CommandResult<(Connection, PathBuf)> {
         .map_err(|error| format!("No se pudo localizar app data: {error}"))?;
     fs::create_dir_all(&data_dir).map_err(|error| format!("No se pudo crear app data: {error}"))?;
     let db_path = data_dir.join("pos-abarrotes.sqlite3");
-    let conn = Connection::open(db_path).map_err(|error| error.to_string())?;
+    let conn = Connection::open_with_flags(
+        &db_path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_CREATE
+            | OpenFlags::SQLITE_OPEN_FULL_MUTEX,
+    )
+    .map_err(|error| error.to_string())?;
+    configure_connection(&conn)?;
     migrate(&conn)?;
     seed_demo(&conn)?;
     let db_path = app
@@ -998,6 +1039,20 @@ fn init_db(app: &AppHandle) -> CommandResult<(Connection, PathBuf)> {
         .map_err(|error| format!("No se pudo localizar app data: {error}"))?
         .join("pos-abarrotes.sqlite3");
     Ok((conn, db_path))
+}
+
+fn configure_connection(conn: &Connection) -> CommandResult<()> {
+    conn.execute_batch(
+        "
+        PRAGMA foreign_keys = ON;
+        PRAGMA busy_timeout = 5000;
+        PRAGMA journal_mode = WAL;
+        PRAGMA synchronous = NORMAL;
+        PRAGMA temp_store = MEMORY;
+        PRAGMA cache_size = -20000;
+        ",
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn migrate(conn: &Connection) -> CommandResult<()> {
@@ -1428,6 +1483,8 @@ fn migrate(conn: &Connection) -> CommandResult<()> {
         CREATE INDEX IF NOT EXISTS idx_products_active_barcode ON products(active, barcode);
         CREATE INDEX IF NOT EXISTS idx_products_active_stock ON products(active, stock);
         CREATE INDEX IF NOT EXISTS idx_products_active_search ON products(active, search_text);
+        CREATE INDEX IF NOT EXISTS idx_products_lower_sku ON products(lower(sku));
+        CREATE INDEX IF NOT EXISTS idx_products_active_updated ON products(active, updated_at);
         CREATE INDEX IF NOT EXISTS idx_product_taxes_tax_id ON product_taxes(tax_id);
 
         CREATE INDEX IF NOT EXISTS idx_customer_credit_movements_customer_created
@@ -2415,7 +2472,7 @@ fn auth_create_initial_admin(
     let name = input.name.trim();
     let pin = input.pin.trim();
     validate_required_text(name, 2, "Nombre muy corto")?;
-    validate_pin(pin, 6, "PIN inicial")?;
+    validate_pin(pin, 4, "Contraseña inicial")?;
     let conn = state.db.lock().map_err(|error| error.to_string())?;
     let active_users: i64 = conn
         .query_row("SELECT COUNT(*) FROM users WHERE active = 1", [], |row| {
@@ -2452,10 +2509,10 @@ fn auth_login(state: State<'_, AppState>, input: LoginInput) -> CommandResult<Us
         .optional()
         .map_err(|error| error.to_string())?;
     let Some((id, name, role, pin_hash)) = user else {
-        return Err("Usuario o PIN incorrecto".into());
+        return Err("Usuario o contraseña incorrectos".into());
     };
     if !verify_pin(&pin_hash, &input.pin) {
-        return Err("Usuario o PIN incorrecto".into());
+        return Err("Usuario o contraseña incorrectos".into());
     }
     if !pin_hash.starts_with("$argon2") {
         conn.execute(
@@ -2503,7 +2560,7 @@ fn user_create(
     let name = input.name.trim();
     let pin = input.pin.trim();
     validate_required_text(name, 2, "Nombre muy corto")?;
-    validate_pin(pin, 4, "PIN")?;
+    validate_pin(pin, 4, "Contraseña")?;
     let role = match input.role.as_str() {
         "admin" => "admin",
         _ => "cashier",
@@ -2558,7 +2615,7 @@ fn user_update(
         .map(str::trim)
         .filter(|value| !value.is_empty());
     if let Some(pin) = pin {
-        validate_pin(pin, 4, "PIN")?;
+        validate_pin(pin, 4, "Contraseña")?;
     }
     let conn = state.db.lock().map_err(|error| error.to_string())?;
     require_admin(&conn, actor_id)?;
@@ -2641,6 +2698,45 @@ fn product_search_with_conn(
     let trimmed = query.trim();
     let normalized = normalize_catalog_text(trimmed);
     let normalized_code = normalize_catalog_code(trimmed);
+    if normalized.is_empty() {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, sku, barcode, name, category, unit, price, wholesale_price, cost, stock, min_stock, tax_rate, active
+                 FROM products
+                 WHERE active = 1
+                 ORDER BY lower(barcode), name
+                 LIMIT ?1 OFFSET ?2",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map(params![limit, offset], map_product)
+            .map_err(|error| error.to_string())?;
+        let mut products = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        hydrate_products_taxes(conn, &mut products)?;
+        return Ok(products);
+    }
+    let mut exact_stmt = conn
+        .prepare(
+            "SELECT id, sku, barcode, name, category, unit, price, wholesale_price, cost, stock, min_stock, tax_rate, active
+             FROM products
+             WHERE active = 1
+               AND (barcode = ?1 OR lower(sku) = ?2 OR replace(lower(barcode), ' ', '') = ?2)
+             ORDER BY lower(barcode), name
+             LIMIT ?3",
+        )
+        .map_err(|error| error.to_string())?;
+    let exact_rows = exact_stmt
+        .query_map(params![trimmed, normalized_code, limit], map_product)
+        .map_err(|error| error.to_string())?;
+    let mut exact_products = exact_rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    if !exact_products.is_empty() {
+        hydrate_products_taxes(conn, &mut exact_products)?;
+        return Ok(exact_products);
+    }
     let like = format!("%{}%", normalized);
     let raw_like = format!("%{}%", trimmed.to_lowercase());
     let mut stmt = conn
@@ -2648,38 +2744,30 @@ fn product_search_with_conn(
             "SELECT id, sku, barcode, name, category, unit, price, wholesale_price, cost, stock, min_stock, tax_rate, active
              FROM products
              WHERE active = 1
-               AND (?1 = ''
-                    OR barcode = ?2
-                    OR lower(sku) = ?3
-                    OR replace(lower(barcode), ' ', '') = ?3
-                    OR search_text LIKE ?4
-                    OR lower(name) LIKE ?5
-                    OR lower(category) LIKE ?5
-                    OR lower(sku) LIKE ?5)
+               AND (search_text LIKE ?1
+                    OR lower(name) LIKE ?2
+                    OR lower(category) LIKE ?2
+                    OR lower(sku) LIKE ?2)
              ORDER BY
                CASE
-                 WHEN ?1 = '' THEN 0
-                 WHEN barcode = ?2 OR lower(sku) = ?3 THEN 0
-                 WHEN search_text LIKE ?4 THEN 1
+                 WHEN search_text LIKE ?1 THEN 1
                  ELSE 2
                END,
                lower(barcode),
                name
-             LIMIT ?6 OFFSET ?7",
+             LIMIT ?3 OFFSET ?4",
         )
         .map_err(|error| error.to_string())?;
     let rows = stmt
         .query_map(
-            params![normalized, trimmed, normalized_code, like, raw_like, limit, offset],
+            params![like, raw_like, limit, offset],
             map_product,
         )
         .map_err(|error| error.to_string())?;
     let mut products = rows
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
-    for product in &mut products {
-        hydrate_product_taxes(conn, product)?;
-    }
+    hydrate_products_taxes(conn, &mut products)?;
     Ok(products)
 }
 
@@ -2714,9 +2802,7 @@ fn product_get_many(
     let mut products = rows
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
-    for product in &mut products {
-        hydrate_product_taxes(&conn, product)?;
-    }
+    hydrate_products_taxes(&conn, &mut products)?;
     Ok(products)
 }
 
@@ -2746,6 +2832,14 @@ fn product_upsert(
     let tax_rate = tax_rate_for_ids(&conn, &input.tax_ids, input.tax_rate)?;
     let id = match input.id {
         Some(id) => {
+            let before: Option<(f64, f64)> = conn
+                .query_row(
+                    "SELECT price, stock FROM products WHERE id = ?1",
+                    params![id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?;
             conn.execute(
                 "UPDATE products
                  SET sku = ?1, barcode = ?2, name = ?3, category = ?4, unit = ?5, price = ?6,
@@ -2771,6 +2865,23 @@ fn product_upsert(
                 ],
             )
             .map_err(|error| error.to_string())?;
+            if let Some((old_price, old_stock)) = before {
+                let mut details = Vec::new();
+                if (old_price - input.price).abs() > 0.0001 {
+                    details.push(format!("precio {:.2} -> {:.2}", old_price, input.price));
+                }
+                if (old_stock - input.stock).abs() > 0.0001 {
+                    details.push(format!("stock {:.3} -> {:.3}", old_stock, input.stock));
+                }
+                if !details.is_empty() {
+                    conn.execute(
+                        "INSERT INTO audit_log (actor_id, action, entity, entity_id, details, created_at)
+                         VALUES (?1, 'product_update', 'product', ?2, ?3, ?4)",
+                        params![actor_id, id, details.join(" · "), now],
+                    )
+                    .map_err(|error| error.to_string())?;
+                }
+            }
             id
         }
         None => {
@@ -2796,7 +2907,14 @@ fn product_upsert(
                 ],
             )
             .map_err(|error| error.to_string())?;
-            conn.last_insert_rowid()
+            let id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO audit_log (actor_id, action, entity, entity_id, details, created_at)
+                 VALUES (?1, 'product_create', 'product', ?2, ?3, ?4)",
+                params![actor_id, id, format!("{name} · precio {:.2} · stock {:.3}", input.price, input.stock), now],
+            )
+            .map_err(|error| error.to_string())?;
+            id
         }
     };
     save_product_taxes(&conn, id, &input.tax_ids)?;
@@ -2815,12 +2933,57 @@ fn product_bulk_import(
 }
 
 #[tauri::command]
+fn product_bulk_validate(
+    state: State<'_, AppState>,
+    actor_id: i64,
+    rows: Vec<ProductImportRow>,
+) -> CommandResult<ProductImportResult> {
+    let conn = state.db.lock().map_err(|error| error.to_string())?;
+    require_permission(&conn, actor_id, "products")?;
+    let mut issues = Vec::new();
+    let mut seen_barcodes = HashSet::new();
+    for row in &rows {
+        let barcode = row.barcode.trim();
+        if barcode.is_empty() {
+            issues.push(product_import_issue(row, "Codigo requerido"));
+            continue;
+        }
+        if !seen_barcodes.insert(barcode.to_string()) {
+            issues.push(product_import_issue(row, "Codigo duplicado en archivo"));
+            continue;
+        }
+        match existing_product_id_for_import(&conn, barcode, barcode) {
+            Ok(Some(_)) => issues.push(product_import_issue(row, "Codigo ya existe en catalogo")),
+            Ok(None) => {}
+            Err(message) => issues.push(product_import_issue(row, message)),
+        }
+    }
+    Ok(ProductImportResult {
+        imported: 0,
+        created: rows.len() as i64 - issues.len() as i64,
+        updated: 0,
+        failed: issues.len() as i64,
+        committed: false,
+        issues,
+    })
+}
+
+#[tauri::command]
 fn product_delete(state: State<'_, AppState>, actor_id: i64, id: i64) -> CommandResult<()> {
     let conn = state.db.lock().map_err(|error| error.to_string())?;
     require_permission(&conn, actor_id, "products")?;
+    let name: String = conn
+        .query_row("SELECT name FROM products WHERE id = ?1", params![id], |row| row.get(0))
+        .map_err(|_| "Producto no encontrado".to_string())?;
     conn.execute(
         "UPDATE products SET active = 0, updated_at = ?1 WHERE id = ?2",
         params![now_iso(), id],
+    )
+    .map_err(|error| error.to_string())?;
+    conn.execute(
+        "INSERT INTO audit_log (actor_id, action, entity, entity_id, details, created_at)
+         VALUES (?1, 'product_delete', 'product', ?2, ?3, ?4)",
+        params![actor_id, id, name, now_iso()],
     )
     .map_err(|error| error.to_string())?;
     Ok(())
@@ -2872,6 +3035,17 @@ fn inventory_adjust(
         "INSERT INTO inventory_movements (product_id, movement_type, quantity, reason, reference_id, created_at)
          VALUES (?1, 'adjustment', ?2, ?3, NULL, ?4)",
         params![input.product_id, input.quantity, reason, now],
+    )
+    .map_err(|error| error.to_string())?;
+    tx.execute(
+        "INSERT INTO audit_log (actor_id, action, entity, entity_id, details, created_at)
+         VALUES (?1, 'stock_adjust', 'product', ?2, ?3, ?4)",
+        params![
+            actor_id,
+            input.product_id,
+            format!("stock {:.3} -> {:.3} · {}", current_stock, current_stock + input.quantity, reason),
+            now
+        ],
     )
     .map_err(|error| error.to_string())?;
     tx.commit().map_err(|error| error.to_string())?;
@@ -4456,14 +4630,33 @@ fn shift_cut_z(
     difference_reason: Option<String>,
 ) -> CommandResult<ShiftCutSnapshot> {
     let mut conn = state.db.lock().map_err(|error| error.to_string())?;
-    close_shift_cut_z_with_conn(
+    let snapshot = close_shift_cut_z_with_conn(
         &mut conn,
         shift_id,
         closing_cash,
         closed_by,
         denominations_json,
         difference_reason,
-    )
+    )?;
+    match backup_create_with_conn(&conn, &state.db_path) {
+        Ok(backup) => {
+            conn.execute(
+                "INSERT INTO audit_log (actor_id, action, entity, entity_id, details, created_at)
+                 VALUES (?1, 'backup_cut_z', 'backup', NULL, ?2, ?3)",
+                params![closed_by, backup.path, backup.created_at],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        Err(error) => {
+            conn.execute(
+                "INSERT INTO audit_log (actor_id, action, entity, entity_id, details, created_at)
+                 VALUES (?1, 'backup_cut_z_failed', 'backup', NULL, ?2, ?3)",
+                params![closed_by, error, now_iso()],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -5148,6 +5341,51 @@ fn report_product_sales(
 }
 
 #[tauri::command]
+fn report_unsold_products(
+    state: State<'_, AppState>,
+    actor_id: i64,
+    from_date: Option<String>,
+    to_date: Option<String>,
+    limit: Option<i64>,
+) -> CommandResult<Vec<ProductSalesReport>> {
+    let conn = state.db.lock().map_err(|error| error.to_string())?;
+    require_permission(&conn, actor_id, "reports")?;
+    let limit = limit.unwrap_or(100).clamp(1, 500);
+    let mut stmt = conn
+        .prepare(
+            "SELECT p.id, p.name, p.category
+             FROM products p
+             WHERE p.active = 1
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM sale_items si
+                 JOIN sales s ON s.id = si.sale_id
+                 WHERE si.product_id = p.id
+                   AND s.status = 'paid'
+                   AND (?1 IS NULL OR date(s.created_at) >= date(?1))
+                   AND (?2 IS NULL OR date(s.created_at) <= date(?2))
+               )
+             ORDER BY p.name
+             LIMIT ?3",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map(params![from_date, to_date, limit], |row| {
+            Ok(ProductSalesReport {
+                product_id: row.get(0)?,
+                product_name: row.get(1)?,
+                category: row.get(2)?,
+                quantity: 0.0,
+                total: 0.0,
+                gross_profit: 0.0,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn report_tax_breakdown(
     state: State<'_, AppState>,
     actor_id: i64,
@@ -5679,7 +5917,42 @@ fn settings_set(
 fn backup_create(state: State<'_, AppState>, actor_id: i64) -> CommandResult<BackupResult> {
     let conn = state.db.lock().map_err(|error| error.to_string())?;
     require_admin(&conn, actor_id)?;
-    backup_create_with_conn(&conn, &state.db_path)
+    let backup = backup_create_with_conn(&conn, &state.db_path)?;
+    conn.execute(
+        "INSERT INTO audit_log (actor_id, action, entity, entity_id, details, created_at)
+         VALUES (?1, 'backup_create', 'backup', NULL, ?2, ?3)",
+        params![actor_id, backup.path, backup.created_at],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(backup)
+}
+
+#[tauri::command]
+fn backup_export_desktop(state: State<'_, AppState>, actor_id: i64) -> CommandResult<BackupResult> {
+    let conn = state.db.lock().map_err(|error| error.to_string())?;
+    require_admin(&conn, actor_id)?;
+    let backup = backup_create_with_conn(&conn, &state.db_path)?;
+    let home = env::var("HOME")
+        .or_else(|_| env::var("USERPROFILE"))
+        .map_err(|_| "No se pudo localizar Escritorio".to_string())?;
+    let export_dir = PathBuf::from(home).join("Desktop").join("RIM-POS-backups");
+    fs::create_dir_all(&export_dir).map_err(|error| error.to_string())?;
+    let file_name = PathBuf::from(&backup.path)
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .ok_or_else(|| "Backup sin nombre de archivo".to_string())?;
+    let export_path = export_dir.join(file_name);
+    fs::copy(&backup.path, &export_path).map_err(|error| error.to_string())?;
+    conn.execute(
+        "INSERT INTO audit_log (actor_id, action, entity, entity_id, details, created_at)
+         VALUES (?1, 'backup_export', 'backup', NULL, ?2, ?3)",
+        params![actor_id, export_path.to_string_lossy().to_string(), backup.created_at],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(BackupResult {
+        path: export_path.to_string_lossy().to_string(),
+        created_at: backup.created_at,
+    })
 }
 
 fn backup_dir_for(db_path: &PathBuf) -> CommandResult<PathBuf> {
@@ -5769,17 +6042,19 @@ fn backup_restore(
         let reopened = Connection::open(&state.db_path).map_err(|open_error| {
             format!("Restore fallo: {error}. Reabrir backup de seguridad fallo: {open_error}")
         })?;
+        configure_connection(&reopened)?;
         migrate(&reopened)?;
         *conn = reopened;
         return Err(format!("No se pudo restaurar backup: {error}"));
     }
 
     let reopened = Connection::open(&state.db_path).map_err(|error| error.to_string())?;
+    configure_connection(&reopened)?;
     migrate(&reopened)?;
     let _ = reopened.execute(
         "INSERT INTO audit_log (actor_id, action, entity, entity_id, details, created_at)
-         VALUES (NULL, 'restore', 'backup', NULL, ?1, ?2)",
-        params![requested.to_string_lossy().to_string(), restored_at],
+         VALUES (?1, 'backup_restore', 'backup', NULL, ?2, ?3)",
+        params![actor_id, requested.to_string_lossy().to_string(), restored_at],
     );
     *conn = reopened;
 
@@ -5849,6 +6124,12 @@ fn backup_auto_if_due(
          VALUES (?1, ?2, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
         params![AUTO_BACKUP_LAST_SETTING, backup.created_at],
+    )
+    .map_err(|error| error.to_string())?;
+    conn.execute(
+        "INSERT INTO audit_log (actor_id, action, entity, entity_id, details, created_at)
+         VALUES (?1, 'backup_auto', 'backup', NULL, ?2, ?3)",
+        params![actor_id, backup.path, backup.created_at],
     )
     .map_err(|error| error.to_string())?;
     Ok(Some(backup))
@@ -5923,10 +6204,11 @@ mod tests {
     }
 
     #[test]
-    fn validation_rejects_weak_or_non_numeric_pin() {
-        assert!(validation::validate_pin("1234", 4, "PIN").is_ok());
-        assert!(validation::validate_pin("12a4", 4, "PIN").is_err());
-        assert!(validation::validate_pin("123", 4, "PIN").is_err());
+    fn validation_accepts_secure_passwords_and_rejects_weak_ones() {
+        assert!(validation::validate_pin("Abc12345", 4, "Contraseña").is_ok());
+        assert!(validation::validate_pin("1234", 4, "Contraseña").is_ok());
+        assert!(validation::validate_pin("abcd", 4, "Contraseña").is_ok());
+        assert!(validation::validate_pin("Ab1", 4, "Contraseña").is_err());
     }
 
     #[test]
@@ -6220,6 +6502,7 @@ pub fn run() {
             product_search,
             product_get_many,
             product_upsert,
+            product_bulk_validate,
             product_bulk_import,
             product_delete,
             inventory_adjust,
@@ -6266,6 +6549,7 @@ pub fn run() {
             app_bootstrap,
             report_summary,
             report_product_sales,
+            report_unsold_products,
             report_tax_breakdown,
             report_movement_history,
             monthly_sales_report,
@@ -6278,6 +6562,7 @@ pub fn run() {
             settings_get,
             settings_set,
             backup_create,
+            backup_export_desktop,
             backup_list,
             backup_restore,
             backup_auto_if_due

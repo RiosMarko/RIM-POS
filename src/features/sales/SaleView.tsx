@@ -5,6 +5,8 @@ import { selectNumericInput } from "../../lib/numberInput";
 import type { CartLine, HeldTicket, Product, SaleReceipt } from "../../types";
 import { functionKeys } from "./SaleModals";
 
+const PRODUCT_SEARCH_DEBOUNCE_MS = 140;
+
 export function SaleView({
   query,
   products,
@@ -101,6 +103,14 @@ export function SaleView({
   }, [normalizedQuery, visibleSuggestions.length]);
 
   useEffect(() => {
+    if (!query.trim()) return;
+    const handle = window.setTimeout(() => {
+      refreshProducts(query).catch((error) => showToast(String(error)));
+    }, PRODUCT_SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(handle);
+  }, [query, refreshProducts, showToast]);
+
+  useEffect(() => {
     selectedLineRef.current?.scrollIntoView({ block: "nearest" });
   }, [selectedCartProductId]);
 
@@ -136,7 +146,6 @@ export function SaleView({
               value={query}
               onChange={(event) => {
                 setQuery(event.target.value);
-                refreshProducts(event.target.value).catch((error) => showToast(String(error)));
               }}
               onKeyDown={handleSearchKeyDown}
               placeholder="Escanea codigo o busca producto"

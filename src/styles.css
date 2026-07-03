@@ -2310,20 +2310,53 @@ kbd {
 }
 
 .backup-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  gap: 14px;
   padding: 12px;
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
   background: white;
 }
 
-.backup-row > div {
+.backup-row-main {
   display: grid;
-  gap: 4px;
+  gap: 6px;
   min-width: 0;
+}
+
+.backup-row-main strong {
+  color: var(--brand-dark);
+  font-size: 0.98rem;
+}
+
+.backup-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.backup-meta span {
+  min-height: 24px;
+  padding: 4px 8px 0;
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
+.backup-row-main small,
+.admin-safety-strip small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .backup-row span,
@@ -3669,9 +3702,11 @@ kbd {
 
 .customer-row {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) 120px 120px 120px minmax(330px, auto);
+  grid-template-columns: minmax(170px, 1fr) minmax(88px, 0.55fr) minmax(88px, 0.55fr) minmax(98px, 0.6fr) minmax(220px, 0.9fr);
   align-items: center;
   gap: var(--space-2);
+  width: 100%;
+  min-width: 0;
   min-height: 58px;
   padding: var(--space-2) 10px;
   border: 1px solid var(--line-strong);
@@ -3729,8 +3764,49 @@ kbd {
 }
 
 .customer-actions button {
+  flex: 0 1 auto;
   min-height: 34px;
   padding: 0 10px;
+}
+
+@media (max-width: 1180px) {
+  .customer-row {
+    grid-template-columns: minmax(150px, 1fr) repeat(3, minmax(76px, 0.5fr)) minmax(174px, 0.8fr);
+    gap: 6px;
+    padding-inline: 8px;
+  }
+
+  .customer-actions {
+    gap: 6px;
+  }
+
+  .customer-actions button {
+    min-height: 32px;
+    padding: 0 8px;
+  }
+}
+
+@media (max-width: 920px) {
+  .customer-row {
+    grid-template-columns: 1fr 1fr;
+    align-items: start;
+  }
+
+  .customer-head {
+    display: none;
+  }
+
+  .customer-row > :nth-child(2),
+  .customer-row > :nth-child(3),
+  .customer-row > :nth-child(4) {
+    justify-self: start;
+    text-align: left;
+  }
+
+  .customer-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
 }
 
 .user-row:hover {

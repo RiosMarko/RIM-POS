@@ -1,10 +1,11 @@
 import { AlertTriangle, CheckCircle2, PackagePlus, Search, Trash2 } from "lucide-react";
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ConfirmDraft } from "../../components/modals/CommonModals";
+import { AdminGate } from "../auth/AuthScreens";
 import { parseCsvLine } from "../../lib/csv";
 import { money } from "../../lib/money";
 import { selectNumericInput } from "../../lib/numberInput";
-import { bulkImportProducts, deleteProduct, getSetting, listTaxes, upsertProduct } from "../../lib/posApi";
+import { bulkImportProducts, deleteProduct, getSetting, listTaxes, upsertProduct, validateProductImport } from "../../lib/posApi";
 import type { ProductSearchOptions } from "../../lib/posApi";
 import { downloadXlsx, eleventaRowsFromProducts, parseEleventaCatalogXlsx } from "../../lib/xlsx";
 import type { Product, ProductImportIssue, ProductImportResult, ProductImportRow, TaxOption } from "../../types";
@@ -36,6 +37,7 @@ const fallbackTaxOptions: TaxOption[] = [
 const PRODUCT_PAGE_SIZE = 50;
 const PRODUCT_LOAD_MORE_SIZE = 100;
 const PRODUCT_VIEW_ALL_LIMIT = 50_000;
+const PRODUCT_SEARCH_DEBOUNCE_MS = 180;
 
 const normalizeBarcode = (value: string) => value.replace(/[^0-9A-Za-z]/g, "").trim();
 
@@ -64,6 +66,54 @@ const suggestCategory = (name: string, fallback = "Abarrotes") => {
   return fallback || "Abarrotes";
 };
 
+const formatTaxPercent = (rate: number) => `${Math.round(rate * 1000) / 10}%`;
+
+type ProductRowProps = {
+  product: Product;
+  selected: boolean;
+  ivaLabel: string;
+  iepsLabel: string;
+  onToggle: (productId: number) => void;
+  onEdit: (product: Product) => void;
+  onRemove: (product: Product) => void;
+};
+
+const ProductRow = memo(function ProductRow({
+  product,
+  selected,
+  ivaLabel,
+  iepsLabel,
+  onToggle,
+  onEdit,
+  onRemove,
+}: ProductRowProps) {
+  return (
+    <div className={`catalog-row ${selected ? "selected" : ""}`}>
+      <label className="row-checkbox" aria-label={`Seleccionar ${product.name}`}>
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={() => onToggle(product.id)}
+        />
+      </label>
+      <strong>{product.name}</strong>
+      <span>{product.barcode}</span>
+      <span>{product.category}</span>
+      <span>{money(product.cost)}</span>
+      <span>{money(product.price)}</span>
+      <span>{product.wholesale_price ? money(product.wholesale_price) : "-"}</span>
+      <span>{ivaLabel}</span>
+      <span>{iepsLabel}</span>
+      <button className="ghost-button row-action" type="button" onClick={() => onEdit(product)}>
+        Editar
+      </button>
+      <button className="icon-button danger" type="button" onClick={() => onRemove(product)} aria-label={`Desactivar ${product.name}`}>
+        <Trash2 size={16} />
+      </button>
+    </div>
+  );
+});
+
 export function ProductsView({
   products,
   refreshProducts,
@@ -71,7 +121,7 @@ export function ProductsView({
   requestConfirm,
 }: {
   products: Product[];
-  refreshProducts: (query?: string, options?: ProductSearchOptions) => Promise<void>;
+  refreshProducts: (query?: string, options?: ProductSearchOptions) => Promise<Product[]>;
   showToast: (message: string) => void;
   requestConfirm: (draft: ConfirmDraft) => void;
 }) {
@@ -82,6 +132,7 @@ export function ProductsView({
   const [taxAutoApply, setTaxAutoApply] = useState(true);
   const [taxOptions, setTaxOptions] = useState<TaxOption[]>([]);
   const [busy, setBusy] = useState(false);
+  const [catalogLoading, setCatalogLoading] = useState(false);
   const [catalogQuery, setCatalogQuery] = useState("");
   const [catalogLimit, setCatalogLimit] = useState(PRODUCT_PAGE_SIZE);
   const [selectedProductIds, setSelectedProductIds] = useState<Set<number>>(new Set());
@@ -89,23 +140,45 @@ export function ProductsView({
   const [editorOpen, setEditorOpen] = useState(false);
   const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
   const [lastImportResult, setLastImportResult] = useState<ProductImportResult | null>(null);
+  const [deleteAdminDraft, setDeleteAdminDraft] = useState<Product | null>(null);
+  const [bulkDeleteAdminDraft, setBulkDeleteAdminDraft] = useState<Product[] | null>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
+  const catalogLoadingRef = useRef(false);
+  const catalogSearchTimerRef = useRef<number | null>(null);
   const pageProducts = useMemo(() => products.slice(0, catalogLimit), [catalogLimit, products]);
   const catalogPageEnd = pageProducts.length;
   const hasMoreProducts = products.length > catalogLimit;
   const selectedProducts = useMemo(() => pageProducts.filter((product) => selectedProductIds.has(product.id)), [pageProducts, selectedProductIds]);
-  const allPageSelected = pageProducts.length > 0 && pageProducts.every((product) => selectedProductIds.has(product.id));
+  const allPageSelected = useMemo(
+    () => pageProducts.length > 0 && pageProducts.every((product) => selectedProductIds.has(product.id)),
+    [pageProducts, selectedProductIds],
+  );
 
   const loadCatalog = useCallback(async (query: string, limit = catalogLimit) => {
-    await refreshProducts(query, { limit: limit + 1, offset: 0 });
+    catalogLoadingRef.current = true;
+    setCatalogLoading(true);
+    try {
+      return await refreshProducts(query, { limit: limit + 1, offset: 0 });
+    } finally {
+      catalogLoadingRef.current = false;
+      setCatalogLoading(false);
+    }
   }, [catalogLimit, refreshProducts]);
+
+  const queueCatalogLoad = useCallback((query: string) => {
+    if (catalogSearchTimerRef.current) window.clearTimeout(catalogSearchTimerRef.current);
+    catalogSearchTimerRef.current = window.setTimeout(() => {
+      catalogSearchTimerRef.current = null;
+      loadCatalog(query, PRODUCT_PAGE_SIZE).catch((error) => showToast(String(error)));
+    }, PRODUCT_SEARCH_DEBOUNCE_MS);
+  }, [loadCatalog, showToast]);
 
   const activeTaxOptions = useMemo(() => taxOptions.length ? taxOptions : fallbackTaxOptions, [taxOptions]);
   const formTaxRate = useMemo(() => form.tax_ids.reduce((sum, taxId) => {
     const tax = activeTaxOptions.find((option) => option.id === taxId);
     return sum + (tax?.rate ?? 0);
   }, 0), [activeTaxOptions, form.tax_ids]);
-  const taxIdsForProduct = (product: Product) => {
+  const taxIdsForProduct = useCallback((product: Product) => {
     if (product.tax_ids?.length) return product.tax_ids;
     if (product.tax_rate <= 0) return [];
     const exact = activeTaxOptions.find((tax) => Math.abs(tax.rate - product.tax_rate) < 0.0001);
@@ -117,20 +190,25 @@ export function ProductsView({
       }
     }
     return [];
-  };
-  const formatTaxPercent = (rate: number) => `${Math.round(rate * 1000) / 10}%`;
-  const taxBreakdownForProduct = (product: Product) => {
-    const ids = taxIdsForProduct(product);
-    return ids.reduce(
-      (summary, taxId) => {
-        const tax = activeTaxOptions.find((option) => option.id === taxId);
-        if (tax?.type === "IVA") summary.iva += tax.rate;
-        if (tax?.type === "IEPS") summary.ieps += tax.rate;
-        return summary;
-      },
-      { iva: 0, ieps: 0 },
-    );
-  };
+  }, [activeTaxOptions]);
+  const activeTaxById = useMemo(
+    () => new Map(activeTaxOptions.map((tax) => [tax.id, tax])),
+    [activeTaxOptions],
+  );
+  const taxLabelsByProductId = useMemo(() => {
+    const labels = new Map<number, { iva: string; ieps: string }>();
+    for (const product of pageProducts) {
+      let iva = 0;
+      let ieps = 0;
+      for (const taxId of taxIdsForProduct(product)) {
+        const tax = activeTaxById.get(taxId);
+        if (tax?.type === "IVA") iva += tax.rate;
+        if (tax?.type === "IEPS") ieps += tax.rate;
+      }
+      labels.set(product.id, { iva: formatTaxPercent(iva), ieps: formatTaxPercent(ieps) });
+    }
+    return labels;
+  }, [activeTaxById, pageProducts, taxIdsForProduct]);
 
   const newProductForm = useCallback(() => ({
     ...emptyProductForm,
@@ -168,6 +246,10 @@ export function ProductsView({
     setSelectedProductIds((current) => new Set(Array.from(current).filter((id) => visibleIds.has(id))));
   }, [pageProducts]);
 
+  useEffect(() => () => {
+    if (catalogSearchTimerRef.current) window.clearTimeout(catalogSearchTimerRef.current);
+  }, []);
+
   const save = async (event: FormEvent) => {
     event.preventDefault();
     setBusy(true);
@@ -186,33 +268,58 @@ export function ProductsView({
     }
   };
 
-  const remove = async (product: Product) => {
+  const deleteProductAsAdmin = useCallback(async (product: Product, actorId: number) => {
+    try {
+      await deleteProduct(product.id, actorId);
+      setCatalogLimit(PRODUCT_PAGE_SIZE);
+      await loadCatalog("", PRODUCT_PAGE_SIZE);
+      showToast("Producto desactivado");
+    } catch (error) {
+      showToast(String(error));
+    }
+  }, [loadCatalog, showToast]);
+
+  const deleteProductsAsAdmin = useCallback(async (targetProducts: Product[], actorId: number) => {
+    setBusy(true);
+    try {
+      await Promise.all(targetProducts.map((product) => deleteProduct(product.id, actorId)));
+      setSelectedProductIds(new Set());
+      await loadCatalog(catalogQuery);
+      showToast(`${targetProducts.length} productos borrados`);
+    } catch (error) {
+      showToast(String(error));
+    } finally {
+      setBusy(false);
+    }
+  }, [catalogQuery, loadCatalog, showToast]);
+
+  const remove = useCallback(async (product: Product) => {
     requestConfirm({
       title: "Desactivar producto",
       message: `${product.name} deja de salir en busqueda y venta.`,
       confirmLabel: "Desactivar",
       tone: "danger",
-      onConfirm: async () => {
-        try {
-          await deleteProduct(product.id);
-          setCatalogLimit(PRODUCT_PAGE_SIZE);
-          await loadCatalog("", PRODUCT_PAGE_SIZE);
-          showToast("Producto desactivado");
-        } catch (error) {
-          showToast(String(error));
-        }
-      },
+      onConfirm: async () => setDeleteAdminDraft(product),
     });
-  };
+  }, [requestConfirm]);
 
-  const toggleProductSelection = (productId: number) => {
+  const toggleProductSelection = useCallback((productId: number) => {
     setSelectedProductIds((current) => {
       const next = new Set(current);
       if (next.has(productId)) next.delete(productId);
       else next.add(productId);
       return next;
     });
-  };
+  }, []);
+
+  const editProduct = useCallback((product: Product) => {
+    setForm({
+      ...product,
+      wholesale_price: product.wholesale_price ?? null,
+      tax_ids: taxIdsForProduct(product),
+    });
+    setEditorOpen(true);
+  }, [taxIdsForProduct]);
 
   const toggleSelectPage = () => {
     setSelectedProductIds((current) => {
@@ -269,19 +376,7 @@ export function ProductsView({
       message: `Vas a borrar ${selectedProducts.length} productos. Ya no saldran en busqueda ni venta.`,
       confirmLabel: `Borrar ${selectedProducts.length}`,
       tone: "danger",
-      onConfirm: async () => {
-        setBusy(true);
-        try {
-          await Promise.all(selectedProducts.map((product) => deleteProduct(product.id)));
-          setSelectedProductIds(new Set());
-          await loadCatalog(catalogQuery);
-          showToast(`${selectedProducts.length} productos borrados`);
-        } catch (error) {
-          showToast(String(error));
-        } finally {
-          setBusy(false);
-        }
-      },
+      onConfirm: async () => setBulkDeleteAdminDraft(selectedProducts),
     });
   };
 
@@ -342,6 +437,10 @@ export function ProductsView({
       });
       if (parsed.rows.length === 0) {
         nextIssues.push({ row_number: 0, sku: "", barcode: "", message: "Archivo sin productos" });
+      }
+      if (nextIssues.length === 0) {
+        const dbValidation = await validateProductImport(parsed.rows);
+        nextIssues.push(...dbValidation.issues);
       }
       setLastImportResult(null);
       setImportPreview({ fileName: file.name, rows: parsed.rows, issues: nextIssues });
@@ -407,7 +506,12 @@ export function ProductsView({
         </button>
         </div>
       </div>
-      <form className="catalog-search" onSubmit={(event) => { event.preventDefault(); setCatalogLimit(PRODUCT_PAGE_SIZE); loadCatalog(catalogQuery, PRODUCT_PAGE_SIZE).catch((error) => showToast(String(error))); }}>
+      <form className="catalog-search" onSubmit={(event) => {
+        event.preventDefault();
+        if (catalogSearchTimerRef.current) window.clearTimeout(catalogSearchTimerRef.current);
+        setCatalogLimit(PRODUCT_PAGE_SIZE);
+        loadCatalog(catalogQuery, PRODUCT_PAGE_SIZE).catch((error) => showToast(String(error)));
+      }}>
         <Search size={18} />
         <input
           value={catalogQuery}
@@ -415,7 +519,7 @@ export function ProductsView({
             const nextQuery = event.target.value;
             setCatalogQuery(nextQuery);
             setCatalogLimit(PRODUCT_PAGE_SIZE);
-            loadCatalog(nextQuery, PRODUCT_PAGE_SIZE).catch((error) => showToast(String(error)));
+            queueCatalogLoad(nextQuery);
           }}
           placeholder="Buscar producto por nombre, codigo o departamento"
         />
@@ -632,50 +736,34 @@ export function ProductsView({
         </div>
         {pageProducts.length === 0 ? (
           <div className="table-empty">Sin productos activos</div>
-        ) : pageProducts.map((product) => (
-          <div className={`catalog-row ${selectedProductIds.has(product.id) ? "selected" : ""}`} key={product.id}>
-            <label className="row-checkbox" aria-label={`Seleccionar ${product.name}`}>
-              <input
-                type="checkbox"
-                checked={selectedProductIds.has(product.id)}
-                onChange={() => toggleProductSelection(product.id)}
-              />
-            </label>
-            <strong>{product.name}</strong>
-            <span>{product.barcode}</span>
-            <span>{product.category}</span>
-            <span>{money(product.cost)}</span>
-            <span>{money(product.price)}</span>
-            <span>{product.wholesale_price ? money(product.wholesale_price) : "-"}</span>
-            <span>{formatTaxPercent(taxBreakdownForProduct(product).iva)}</span>
-            <span>{formatTaxPercent(taxBreakdownForProduct(product).ieps)}</span>
-            <button className="ghost-button row-action" type="button" onClick={() => {
-              setForm({
-                ...product,
-                wholesale_price: product.wholesale_price ?? null,
-                tax_ids: taxIdsForProduct(product),
-              });
-              setEditorOpen(true);
-            }}>
-              Editar
-            </button>
-            <button className="icon-button danger" type="button" onClick={() => remove(product)} aria-label={`Desactivar ${product.name}`}>
-              <Trash2 size={16} />
-            </button>
-          </div>
-        ))}
+        ) : pageProducts.map((product) => {
+          const labels = taxLabelsByProductId.get(product.id) ?? { iva: "0%", ieps: "0%" };
+          return (
+            <ProductRow
+              key={product.id}
+              product={product}
+              selected={selectedProductIds.has(product.id)}
+              ivaLabel={labels.iva}
+              iepsLabel={labels.ieps}
+              onToggle={toggleProductSelection}
+              onEdit={editProduct}
+              onRemove={remove}
+            />
+          );
+        })}
       </div>
       <div className="table-pagination">
-        <span>{pageProducts.length === 0 ? "Sin resultados" : `${catalogPageEnd} productos visibles por codigo`}</span>
+        <span>{pageProducts.length === 0 ? "Sin resultados" : `${catalogPageEnd} productos visibles por codigo${catalogLoading ? "..." : ""}`}</span>
         <div>
           <button
             className="ghost-button"
             type="button"
-            disabled={!hasMoreProducts}
+            disabled={!hasMoreProducts || catalogLoading}
             onClick={() => {
               const nextLimit = catalogLimit + PRODUCT_LOAD_MORE_SIZE;
-              setCatalogLimit(nextLimit);
-              loadCatalog(catalogQuery, nextLimit).catch((error) => showToast(String(error)));
+              loadCatalog(catalogQuery, nextLimit)
+                .then((result) => setCatalogLimit(Math.min(nextLimit, Math.max(result.length, PRODUCT_PAGE_SIZE))))
+                .catch((error) => showToast(String(error)));
             }}
           >
             Ver mas
@@ -683,16 +771,41 @@ export function ProductsView({
           <button
             className="ghost-button"
             type="button"
-            disabled={!hasMoreProducts}
+            disabled={!hasMoreProducts || catalogLoading}
             onClick={() => {
-              setCatalogLimit(PRODUCT_VIEW_ALL_LIMIT);
-              loadCatalog(catalogQuery, PRODUCT_VIEW_ALL_LIMIT).catch((error) => showToast(String(error)));
+              loadCatalog(catalogQuery, PRODUCT_VIEW_ALL_LIMIT)
+                .then((result) => setCatalogLimit(Math.max(result.length, PRODUCT_PAGE_SIZE)))
+                .catch((error) => showToast(String(error)));
             }}
           >
             Ver todo
           </button>
         </div>
       </div>
+      {deleteAdminDraft && (
+        <AdminGate
+          targetLabel="borrar producto"
+          onCancel={() => setDeleteAdminDraft(null)}
+          onSuccess={(adminSession) => {
+            const product = deleteAdminDraft;
+            setDeleteAdminDraft(null);
+            deleteProductAsAdmin(product, adminSession.id);
+          }}
+          showToast={showToast}
+        />
+      )}
+      {bulkDeleteAdminDraft && (
+        <AdminGate
+          targetLabel="borrar productos"
+          onCancel={() => setBulkDeleteAdminDraft(null)}
+          onSuccess={(adminSession) => {
+            const targetProducts = bulkDeleteAdminDraft;
+            setBulkDeleteAdminDraft(null);
+            deleteProductsAsAdmin(targetProducts, adminSession.id);
+          }}
+          showToast={showToast}
+        />
+      )}
     </section>
   );
 }

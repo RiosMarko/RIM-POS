@@ -192,8 +192,9 @@ function App() {
     const requestId = adminProductSearchRequestRef.current + 1;
     adminProductSearchRequestRef.current = requestId;
     const result = await searchProducts(nextQuery, options);
-    if (requestId !== adminProductSearchRequestRef.current) return;
+    if (requestId !== adminProductSearchRequestRef.current) return [];
     setAdminProducts(result);
+    return result;
   }, []);
 
   const refreshHeldTickets = useCallback(async () => {

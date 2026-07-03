@@ -117,8 +117,8 @@ export function UsersView({ showToast, requestConfirm }: { showToast: (message: 
           <input value={name} onChange={(event) => setName(event.target.value)} placeholder="Ej. Maria turno tarde" />
         </label>
         <label>
-          PIN
-          <input value={pin} onChange={(event) => setPin(event.target.value)} type="password" inputMode="numeric" placeholder={editingId ? "Dejar vacio conserva PIN" : "Minimo 4 digitos"} />
+          Contraseña
+          <input value={pin} onChange={(event) => setPin(event.target.value)} type="password" placeholder={editingId ? "Vacio conserva contraseña" : "Minimo 4 caracteres"} />
         </label>
         <label>
           Rol
