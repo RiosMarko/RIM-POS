@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::thread;
@@ -109,6 +110,221 @@ fn add_device(
     }
 }
 
+fn extract_ipv4(value: &str) -> Option<Ipv4Addr> {
+    value.split(|character: char| !(character.is_ascii_digit() || character == '.'))
+        .find_map(|part| part.parse::<Ipv4Addr>().ok())
+}
+
+fn is_usable_ipv4(ip: &Ipv4Addr) -> bool {
+    !ip.is_loopback() && !ip.is_unspecified() && !ip.octets().starts_with(&[169, 254])
+}
+
+fn local_ipv4_addresses() -> Vec<Ipv4Addr> {
+    let mut seen = HashSet::new();
+    let mut result = Vec::new();
+
+    #[cfg(windows)]
+    {
+        let command = "Get-NetIPAddress -AddressFamily IPv4 | ForEach-Object { $_.IPAddress }";
+        for line in command_lines("powershell", &powershell_args(command)) {
+            if let Some(ip) = extract_ipv4(&line).filter(is_usable_ipv4) {
+                if seen.insert(ip) {
+                    result.push(ip);
+                }
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        for line in command_lines("ifconfig", &[]) {
+            let trimmed = line.trim_start();
+            if let Some(rest) = trimmed.strip_prefix("inet ") {
+                if let Some(ip) = extract_ipv4(rest).filter(is_usable_ipv4) {
+                    if seen.insert(ip) {
+                        result.push(ip);
+                    }
+                }
+            }
+        }
+        if result.is_empty() {
+            for line in command_lines("hostname", &["-I"]) {
+                for part in line.split_whitespace() {
+                    if let Some(ip) = extract_ipv4(part).filter(is_usable_ipv4) {
+                        if seen.insert(ip) {
+                            result.push(ip);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    result
+}
+
+fn arp_ipv4_hosts() -> Vec<Ipv4Addr> {
+    let mut seen = HashSet::new();
+    let mut result = Vec::new();
+    for line in command_lines("arp", &["-a"]) {
+        if let Some(ip) = extract_ipv4(&line).filter(is_usable_ipv4) {
+            if seen.insert(ip) {
+                result.push(ip);
+            }
+        }
+    }
+    result
+}
+
+fn network_endpoint(device: &str) -> Option<SocketAddr> {
+    let endpoint = device.strip_prefix("tcp://")?;
+    let (host, port) = endpoint.rsplit_once(':')?;
+    let port = port.parse::<u16>().ok()?;
+    format!("{host}:{port}")
+        .to_socket_addrs()
+        .ok()?
+        .find(|address| address.is_ipv4())
+}
+
+fn resolve_first_ipv4(host: &str, port: u16) -> Option<Ipv4Addr> {
+    format!("{host}:{port}")
+        .to_socket_addrs()
+        .ok()?
+        .find_map(|address| match address.ip() {
+            IpAddr::V4(ip) => Some(ip),
+            IpAddr::V6(_) => None,
+        })
+}
+
+fn tcp_port_open(ip: Ipv4Addr, port: u16, timeout_ms: u64) -> bool {
+    let address = SocketAddr::new(IpAddr::V4(ip), port);
+    TcpStream::connect_timeout(&address, Duration::from_millis(timeout_ms)).is_ok()
+}
+
+fn write_network_device(device: &str, bytes: &[u8]) -> CommandResult<bool> {
+    let Some(address) = network_endpoint(device) else {
+        return Ok(false);
+    };
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(1500))
+        .map_err(|error| format!("No se pudo abrir socket {address}: {error}"))?;
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(1500)));
+    stream
+        .write_all(bytes)
+        .map_err(|error| format!("No se pudo escribir a {address}: {error}"))?;
+    stream
+        .flush()
+        .map_err(|error| format!("No se pudo cerrar envio a {address}: {error}"))?;
+    Ok(true)
+}
+
+fn detect_bonjour_printers(devices: &mut Vec<HardwareDevice>, seen: &mut HashSet<String>) {
+    let regtypes = ["_ipp._tcp", "_ipps._tcp"];
+    for regtype in regtypes {
+        let lines = command_lines(
+            "ippfind",
+            &[
+                "-4",
+                "-T",
+                "2",
+                regtype,
+                "--remote",
+                "--exec",
+                "echo",
+                "{service_name}|{service_hostname}|{service_port}|{service_uri}",
+                ";",
+            ],
+        );
+        for line in lines {
+            let parts: Vec<&str> = line.split('|').collect();
+            let name = clean_device_text(parts.first().copied().unwrap_or(""));
+            let hostname = clean_device_text(parts.get(1).copied().unwrap_or(""));
+            let port = parts
+                .get(2)
+                .and_then(|value| value.parse::<u16>().ok())
+                .unwrap_or(631);
+            let uri = clean_device_text(parts.get(3).copied().unwrap_or(""));
+            if name.is_empty() || hostname.is_empty() {
+                continue;
+            }
+
+            let Some(ip) = resolve_first_ipv4(&hostname, port) else {
+                continue;
+            };
+
+            if tcp_port_open(ip, 9100, 180) {
+                let endpoint = format!("tcp://{ip}:9100");
+                add_device(
+                    devices,
+                    seen,
+                    HardwareDevice {
+                        id: endpoint,
+                        name,
+                        device_type: "printer".into(),
+                        connection: "network-bonjour-raw".into(),
+                        detail: if uri.is_empty() {
+                            format!("Bonjour {hostname} · RAW TCP 9100")
+                        } else {
+                            format!("Bonjour {hostname} · {uri} · RAW TCP 9100")
+                        },
+                        is_default: false,
+                    },
+                );
+            }
+        }
+    }
+}
+
+fn detect_network_printers(devices: &mut Vec<HardwareDevice>, seen: &mut HashSet<String>) {
+    let local_ips = local_ipv4_addresses();
+    if local_ips.is_empty() {
+        return;
+    }
+
+    let mut candidate_ips = HashSet::new();
+    for ip in arp_ipv4_hosts() {
+        candidate_ips.insert(ip);
+    }
+    for ip in &local_ips {
+        let [a, b, c, current] = ip.octets();
+        for host in 1..=254 {
+            if host == current {
+                continue;
+            }
+            candidate_ips.insert(Ipv4Addr::new(a, b, c, host));
+        }
+    }
+
+    let mut workers = Vec::new();
+    for ip in candidate_ips {
+        workers.push(thread::spawn(move || {
+            if tcp_port_open(ip, 9100, 120) {
+                Some(ip)
+            } else {
+                None
+            }
+        }));
+    }
+
+    for worker in workers {
+        let Ok(Some(ip)) = worker.join() else {
+            continue;
+        };
+        let endpoint = format!("tcp://{ip}:9100");
+        add_device(
+            devices,
+            seen,
+            HardwareDevice {
+                id: endpoint,
+                name: format!("Impresora LAN {ip}"),
+                device_type: "printer".into(),
+                connection: "network-raw".into(),
+                detail: "Socket RAW TCP 9100 en red local".into(),
+                is_default: false,
+            },
+        );
+    }
+}
+
 fn detect_unix_printers(devices: &mut Vec<HardwareDevice>, seen: &mut HashSet<String>) {
     let default_printer = command_lines("lpstat", &["-d"])
         .into_iter()
@@ -149,6 +365,11 @@ fn detect_unix_printers(devices: &mut Vec<HardwareDevice>, seen: &mut HashSet<St
 }
 
 fn detect_windows_printers(devices: &mut Vec<HardwareDevice>, seen: &mut HashSet<String>) {
+    let default_command =
+        "(Get-CimInstance Win32_Printer | Where-Object { $_.Default }).Name | Select-Object -First 1";
+    let default_printer = command_lines("powershell", &powershell_args(default_command))
+        .into_iter()
+        .next();
     let command = "Get-Printer | ForEach-Object { \"$($_.Name)|$($_.DriverName)|$($_.PortName)\" }";
     for line in command_lines("powershell", &powershell_args(command)) {
         let parts: Vec<&str> = line.split('|').collect();
@@ -163,11 +384,38 @@ fn detect_windows_printers(devices: &mut Vec<HardwareDevice>, seen: &mut HashSet
             seen,
             HardwareDevice {
                 id: name.clone(),
-                name,
+                name: name.clone(),
                 device_type: "printer".into(),
                 connection: "windows-printer".into(),
                 detail: format!("{driver} {port}").trim().into(),
-                is_default: false,
+                is_default: default_printer.as_deref() == Some(name.as_str()),
+            },
+        );
+    }
+
+    let wmi_command = "Get-CimInstance Win32_Printer | ForEach-Object { \"$($_.Name)|$($_.DriverName)|$($_.PortName)|$($_.Default)\" }";
+    for line in command_lines("powershell", &powershell_args(wmi_command)) {
+        let parts: Vec<&str> = line.split('|').collect();
+        let name = clean_device_text(parts.first().copied().unwrap_or(""));
+        if name.is_empty() {
+            continue;
+        }
+        let driver = clean_device_text(parts.get(1).copied().unwrap_or(""));
+        let port = clean_device_text(parts.get(2).copied().unwrap_or(""));
+        let is_default = parts
+            .get(3)
+            .map(|value| value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        add_device(
+            devices,
+            seen,
+            HardwareDevice {
+                id: name.clone(),
+                name,
+                device_type: "printer".into(),
+                connection: "windows-wmi-printer".into(),
+                detail: format!("{driver} {port}").trim().into(),
+                is_default,
             },
         );
     }
@@ -176,8 +424,7 @@ fn detect_windows_printers(devices: &mut Vec<HardwareDevice>, seen: &mut HashSet
 fn detect_serial_paths(devices: &mut Vec<HardwareDevice>, seen: &mut HashSet<String>) {
     #[cfg(windows)]
     {
-        let command =
-            "Get-CimInstance Win32_SerialPort | ForEach-Object { \"$($_.DeviceID)|$($_.Name)\" }";
+        let command = "Get-CimInstance Win32_SerialPort | ForEach-Object { \"$($_.DeviceID)|$($_.Name)|$($_.PNPDeviceID)\" }";
         for line in command_lines("powershell", &powershell_args(command)) {
             let parts: Vec<&str> = line.split('|').collect();
             let id = clean_device_text(parts.first().copied().unwrap_or(""));
@@ -193,7 +440,29 @@ fn detect_serial_paths(devices: &mut Vec<HardwareDevice>, seen: &mut HashSet<Str
                     name,
                     device_type: "serial".into(),
                     connection: "serial".into(),
-                    detail: "Puerto serial local".into(),
+                    detail: clean_device_text(parts.get(2).copied().unwrap_or("Puerto serial local")),
+                    is_default: false,
+                },
+            );
+        }
+
+        let pnp_command = r#"Get-CimInstance Win32_PnPEntity | Where-Object { $_.Name -match '\(COM[0-9]+\)' } | ForEach-Object { if ($_.Name -match '(COM[0-9]+)') { "$($Matches[1])|$($_.Name)|$($_.PNPDeviceID)" } }"#;
+        for line in command_lines("powershell", &powershell_args(pnp_command)) {
+            let parts: Vec<&str> = line.split('|').collect();
+            let id = clean_device_text(parts.first().copied().unwrap_or(""));
+            if id.is_empty() {
+                continue;
+            }
+            let name = clean_device_text(parts.get(1).copied().unwrap_or(&id));
+            add_device(
+                devices,
+                seen,
+                HardwareDevice {
+                    id: id.clone(),
+                    name,
+                    device_type: "serial".into(),
+                    connection: "windows-pnp-port".into(),
+                    detail: clean_device_text(parts.get(2).copied().unwrap_or("Puerto COM")),
                     is_default: false,
                 },
             );
@@ -203,12 +472,35 @@ fn detect_serial_paths(devices: &mut Vec<HardwareDevice>, seen: &mut HashSet<Str
     #[cfg(not(windows))]
     {
         let prefixes = [
-            "ttyUSB", "ttyACM", "tty.usb", "cu.usb", "ttyS", "cu.SLAB", "tty.SLAB",
+            "ttyUSB",
+            "ttyACM",
+            "tty.usb",
+            "cu.usb",
+            "ttyS",
+            "cu.SLAB",
+            "tty.SLAB",
+            "cu.wchusbserial",
+            "tty.wchusbserial",
+            "cu.usbserial",
+            "tty.usbserial",
+            "cu.usbmodem",
+            "tty.usbmodem",
         ];
         if let Ok(entries) = fs::read_dir("/dev") {
             for entry in entries.flatten() {
                 let filename = entry.file_name().to_string_lossy().to_string();
-                if !prefixes.iter().any(|prefix| filename.starts_with(prefix)) {
+                let lower = filename.to_ascii_lowercase();
+                if lower.contains("bluetooth") || lower.contains("incoming-port") {
+                    continue;
+                }
+                let likely_serial = prefixes.iter().any(|prefix| filename.starts_with(prefix))
+                    || (lower.contains("serial")
+                        || lower.contains("ch34")
+                        || lower.contains("cp210")
+                        || lower.contains("ftdi")
+                        || lower.contains("pl2303"))
+                        && (filename.starts_with("tty") || filename.starts_with("cu."));
+                if !likely_serial {
                     continue;
                 }
                 let path = format!("/dev/{filename}");
@@ -247,7 +539,43 @@ fn detect_serial_paths(devices: &mut Vec<HardwareDevice>, seen: &mut HashSet<Str
     }
 }
 
-pub fn device_list() -> Vec<HardwareDevice> {
+fn detect_raw_printer_paths(devices: &mut Vec<HardwareDevice>, seen: &mut HashSet<String>) {
+    #[cfg(not(windows))]
+    {
+        let raw_dirs = ["/dev/usb", "/dev"];
+        for dir in raw_dirs {
+            if let Ok(entries) = fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let filename = entry.file_name().to_string_lossy().to_string();
+                    let lower = filename.to_ascii_lowercase();
+                    let likely_printer = lower.starts_with("lp")
+                        || lower.starts_with("usblp")
+                        || lower.starts_with("ulpt")
+                        || lower.contains("escpos")
+                        || lower.contains("pos");
+                    if !likely_printer {
+                        continue;
+                    }
+                    let path = entry.path().to_string_lossy().to_string();
+                    add_device(
+                        devices,
+                        seen,
+                        HardwareDevice {
+                            id: path.clone(),
+                            name: filename,
+                            device_type: "printer".into(),
+                            connection: "raw-device".into(),
+                            detail: path,
+                            is_default: false,
+                        },
+                    );
+                }
+            }
+        }
+    }
+}
+
+pub fn device_list(include_network: bool) -> Vec<HardwareDevice> {
     let mut devices = Vec::new();
     let mut seen = HashSet::new();
     if env::consts::OS == "windows" {
@@ -255,21 +583,11 @@ pub fn device_list() -> Vec<HardwareDevice> {
     } else {
         detect_unix_printers(&mut devices, &mut seen);
     }
+    detect_raw_printer_paths(&mut devices, &mut seen);
     detect_serial_paths(&mut devices, &mut seen);
-
-    if devices.is_empty() {
-        add_device(
-            &mut devices,
-            &mut seen,
-            HardwareDevice {
-                id: "mock-printer-80mm".into(),
-                name: "Mock 80mm".into(),
-                device_type: "printer".into(),
-                connection: "mock".into(),
-                detail: "Dispositivo de prueba".into(),
-                is_default: true,
-            },
-        );
+    if include_network {
+        detect_bonjour_printers(&mut devices, &mut seen);
+        detect_network_printers(&mut devices, &mut seen);
     }
     devices
 }
@@ -295,6 +613,17 @@ pub fn run_print_file(printer: &str, file: &PathBuf, raw: bool) -> CommandResult
     let printer = clean_device_text(printer);
     if printer.is_empty() || printer.starts_with("mock-") {
         return Err("Configura una impresora real en Configuracion".into());
+    }
+    let bytes = fs::read(file).map_err(|error| format!("No se pudo leer impresion: {error}"))?;
+    if write_network_device(&printer, &bytes)? {
+        return Ok(());
+    }
+    let direct = printer.starts_with("/dev/")
+        || printer.to_ascii_uppercase().starts_with("COM")
+        || printer.starts_with("\\\\.\\");
+    if direct {
+        write_raw_device(&printer, &bytes)?;
+        return Ok(());
     }
     #[cfg(windows)]
     {
@@ -336,6 +665,9 @@ pub fn write_raw_device(device: &str, bytes: &[u8]) -> CommandResult<bool> {
     let device = clean_device_text(device);
     if device.is_empty() || device.starts_with("mock-") {
         return Ok(false);
+    }
+    if write_network_device(&device, bytes)? {
+        return Ok(true);
     }
     let direct = device.starts_with("/dev/")
         || device.to_ascii_uppercase().starts_with("COM")
@@ -451,12 +783,22 @@ pub fn read_serial_scale(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_scale_weight;
+    use super::{network_endpoint, parse_scale_weight};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     #[test]
     fn parses_common_scale_output() {
         assert_eq!(parse_scale_weight("ST,GS,+  1.235 kg"), Some(1.235));
         assert_eq!(parse_scale_weight("PESO: 0,750kg"), Some(0.750));
         assert_eq!(parse_scale_weight("sin peso"), None);
+    }
+
+    #[test]
+    fn parses_network_tcp_endpoint() {
+        assert_eq!(
+            network_endpoint("tcp://192.168.1.50:9100"),
+            Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)), 9100))
+        );
+        assert_eq!(network_endpoint("/dev/ttyUSB0"), None);
     }
 }

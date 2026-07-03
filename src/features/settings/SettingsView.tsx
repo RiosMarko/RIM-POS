@@ -45,20 +45,50 @@ export function SettingsView({
 
   const printers = useMemo(() => devices.filter((device) => device.device_type === "printer"), [devices]);
   const serialDevices = useMemo(() => devices.filter((device) => device.device_type === "serial"), [devices]);
+  const printerDevices = useMemo(() => {
+    const byId = new Map<string, HardwareDevice>();
+    [...printers, ...serialDevices].forEach((device) => byId.set(device.id, device));
+    return Array.from(byId.values());
+  }, [printers, serialDevices]);
 
-  const detectDevices = useCallback(async () => {
+  const syncDetectedDevices = async (
+    result: HardwareDevice[],
+    current: { printer: string; scale: string; drawer: string },
+  ) => {
+    const defaultPrinter = result.find((device) => device.device_type === "printer" && device.is_default) ?? result.find((device) => device.device_type === "printer");
+    const defaultSerial = result.find((device) => device.device_type === "serial");
+    const printerExists = result.some((device) => device.id === current.printer && (device.device_type === "printer" || device.device_type === "serial"));
+    const scaleExists = result.some((device) => device.id === current.scale && device.device_type === "serial");
+    const drawerExists = result.some((device) => device.id === current.drawer && (device.device_type === "printer" || device.device_type === "serial"));
+    const nextPrinter = printerExists ? current.printer : defaultPrinter?.id ?? "";
+    const nextScale = scaleExists ? current.scale : defaultSerial?.id ?? "";
+    const nextDrawer = drawerExists ? current.drawer : defaultSerial?.id ?? defaultPrinter?.id ?? "";
+
+    if (nextPrinter !== current.printer) {
+      setPrinter(nextPrinter);
+      await setSetting("printer", nextPrinter);
+    }
+    if (nextScale !== current.scale) {
+      setScale(nextScale);
+      await setSetting("scale", nextScale);
+    }
+    if (nextDrawer !== current.drawer) {
+      setDrawer(nextDrawer);
+      await setSetting("drawer", nextDrawer);
+    }
+  };
+
+  const detectDevices = useCallback(async (options?: { silent?: boolean }) => {
     setDetecting(true);
     try {
-      const result = await listHardwareDevices();
+      const result = await listHardwareDevices({ includeNetwork: true });
       setDevices(result);
-      const defaultPrinter = result.find((device) => device.device_type === "printer" && device.is_default) ?? result.find((device) => device.device_type === "printer");
-      const defaultSerial = result.find((device) => device.device_type === "serial");
-      if (defaultPrinter && printer === "mock-printer-80mm") setPrinter(defaultPrinter.id);
-      if (defaultSerial && scale === "mock-scale-serial") setScale(defaultSerial.id);
-      if (defaultSerial && drawer === "mock-drawer-escpos") setDrawer(defaultSerial.id);
-      showToast(`${result.length} dispositivos detectados`);
+      await syncDetectedDevices(result, { printer, scale, drawer });
+      if (!options?.silent) {
+        showToast(result.length ? `${result.length} dispositivos detectados` : "Sin dispositivos reales detectados");
+      }
     } catch (error) {
-      showToast(String(error));
+      if (!options?.silent) showToast(String(error));
     } finally {
       setDetecting(false);
     }
@@ -116,11 +146,16 @@ export function SettingsView({
         nextTicketExtraLines,
         nextTicketCopies,
       ]) => {
-        setPrinter(nextPrinter || "mock-printer-80mm");
+        const nextHardware = {
+          printer: nextPrinter || "mock-printer-80mm",
+          scale: nextScale || "mock-scale-serial",
+          drawer: nextDrawer || "mock-drawer-escpos",
+        };
+        setPrinter(nextHardware.printer);
         setWorkstationId(nextWorkstationId || "CAJA-1");
-        setScale(nextScale || "mock-scale-serial");
+        setScale(nextHardware.scale);
         setScaleBaudRate(Number(nextScaleBaudRate ?? 9600));
-        setDrawer(nextDrawer || "mock-drawer-escpos");
+        setDrawer(nextHardware.drawer);
         const enabled = nextTaxEnabled !== "false";
         setTaxEnabled(enabled);
         setTaxCountry(nextTaxCountry || "MX");
@@ -141,6 +176,12 @@ export function SettingsView({
         setTicketExtraLines(Number(nextTicketExtraLines ?? 3));
         setTicketCopies(Number(nextTicketCopies ?? 1));
         onTaxModeChange({ enabled, pricesIncludeTax: nextTaxPricesIncludeTax !== "false" });
+        listHardwareDevices()
+          .then(async (result) => {
+            setDevices(result);
+            await syncDetectedDevices(result, nextHardware);
+          })
+          .catch(() => setDevices([]));
       })
       .catch((error) => showToast(String(error)));
   }, [onTaxModeChange, showToast]);
@@ -242,8 +283,52 @@ export function SettingsView({
     }
   };
 
+  const saveHardwareSettings = async () => {
+    await setSetting("printer", printer);
+    await setSetting("scale", scale);
+    await setSetting("scale_baud_rate", String(scaleBaudRate));
+    await setSetting("drawer", drawer);
+  };
+
+  const testPrinter = async () => {
+    try {
+      await saveHardwareSettings();
+      const result = await printTicket(0);
+      showToast(result.message);
+    } catch (error) {
+      showToast(String(error));
+    }
+  };
+
+  const testScale = async () => {
+    try {
+      await saveHardwareSettings();
+      const result = await readScale();
+      if (result.baud_rate !== scaleBaudRate) {
+        setScaleBaudRate(result.baud_rate);
+        await setSetting("scale_baud_rate", String(result.baud_rate));
+      }
+      showToast(`${result.weight} ${result.unit} · ${result.baud_rate} baud`);
+    } catch (error) {
+      showToast(String(error));
+    }
+  };
+
+  const testDrawer = async () => {
+    try {
+      await saveHardwareSettings();
+      const result = await openDrawer();
+      showToast(result.message);
+    } catch (error) {
+      showToast(String(error));
+    }
+  };
+
   const deviceLabel = (device: HardwareDevice) => `${device.name}${device.is_default ? " (predeterminado)" : ""}`;
-  const selectedDeviceName = (id: string) => devices.find((device) => device.id === id)?.name ?? id;
+  const selectedDeviceName = (id: string) => {
+    if (!id || id.startsWith("mock-")) return "Sin detectar";
+    return devices.find((device) => device.id === id)?.name ?? `${id} (no detectada)`;
+  };
   const line = "-".repeat(Math.max(24, Math.min(48, ticketWidth)));
   const ticketPreview = useMemo(() => {
     const width = Math.max(24, Math.min(48, ticketWidth));
@@ -383,7 +468,7 @@ export function SettingsView({
                   }}
                   aria-label="Editar preview del ticket"
                 />
-                <button className="ghost-button" type="button" onClick={() => printTicket(0).then((result) => showToast(result.message)).catch((error) => showToast(String(error)))}>
+                <button className="ghost-button" type="button" onClick={testPrinter}>
                   Probar impresora
                 </button>
               </aside>
@@ -454,8 +539,10 @@ export function SettingsView({
                 Impresora ticket
                 <select value={printer} onChange={(event) => setPrinter(event.target.value)}>
                   <option value="">Seleccionar impresora</option>
-                  {printers.map((device) => (
-                    <option value={device.id} key={device.id}>{deviceLabel(device)}</option>
+                  {printerDevices.map((device) => (
+                    <option value={device.id} key={device.id}>
+                      {device.device_type === "serial" ? `Directo por ${deviceLabel(device)}` : deviceLabel(device)}
+                    </option>
                   ))}
                 </select>
               </label>
@@ -470,7 +557,14 @@ export function SettingsView({
               </label>
               <label>
                 Baud bascula
-                <select value={scaleBaudRate} onChange={(event) => setScaleBaudRate(Number(event.target.value))}>
+                <select
+                  value={scaleBaudRate}
+                  onChange={(event) => {
+                    const next = Number(event.target.value);
+                    setScaleBaudRate(next);
+                    void setSetting("scale_baud_rate", String(next));
+                  }}
+                >
                   <option value={2400}>2400</option>
                   <option value={4800}>4800</option>
                   <option value={9600}>9600</option>
@@ -492,11 +586,12 @@ export function SettingsView({
               </label>
             </div>
             <div className="cash-actions">
-              <button className="ghost-button" type="button" onClick={detectDevices} disabled={detecting}>
+              <button className="ghost-button" type="button" onClick={() => void detectDevices()} disabled={detecting}>
                 {detecting ? "Detectando" : "Detectar dispositivos"}
               </button>
-              <button className="ghost-button" type="button" onClick={() => readScale().then((result) => showToast(`${result.weight} ${result.unit}`)).catch((error) => showToast(String(error)))}>Probar bascula</button>
-              <button className="ghost-button" type="button" onClick={() => openDrawer().then((result) => showToast(result.message)).catch((error) => showToast(String(error)))}>Probar cajon</button>
+              <button className="ghost-button" type="button" onClick={testPrinter}>Probar impresora</button>
+              <button className="ghost-button" type="button" onClick={testScale}>Probar bascula</button>
+              <button className="ghost-button" type="button" onClick={testDrawer}>Probar cajon</button>
             </div>
           </section>
 
@@ -553,7 +648,9 @@ export function SettingsView({
             <Setting icon={Percent} label="Impuestos" value={taxEnabled ? `${Math.round(taxDefaultRate * 100)}%, ${taxPricesIncludeTax ? "incluidos" : "sumados"}` : "Desactivados"} />
           </div>
           <div className="device-list">
-            {devices.map((device) => (
+            {devices.length === 0 ? (
+              <div className="muted-note">Sin dispositivos reales detectados.</div>
+            ) : devices.map((device) => (
               <div className="device-row" key={`${device.device_type}-${device.id}`}>
                 <strong>{device.name}</strong>
                 <span>{device.device_type} · {device.connection}</span>

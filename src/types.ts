@@ -224,6 +224,7 @@ export type AppBootstrap = {
   held_tickets: HeldTicket[];
   tax_enabled: boolean;
   tax_prices_include_tax: boolean;
+  unclean_shutdown: boolean;
 };
 
 export type InventoryMovement = {
@@ -334,6 +335,7 @@ export type ScaleReading = {
   weight: number;
   unit: string;
   source: string;
+  baud_rate: number;
 };
 
 export type Supplier = {

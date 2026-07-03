@@ -358,7 +358,7 @@ export async function bulkImportProducts(rows: ProductImportRow[]): Promise<Prod
     else created += 1;
     const tax_ids = row.tax_ids ?? [];
     const tax_rate = tax_ids.length ? taxRateFromIds(tax_ids) : row.tax_rate;
-    const product: Product = { ...row, id, tax_ids, tax_rate };
+    const product: Product = { ...row, id, tax_ids, tax_rate, active: true };
     demoProducts = [product, ...demoProducts.filter((current) => current.id !== id)];
   });
   return { imported: created + updated, created, updated, failed: 0, committed: true, issues: [] };
@@ -375,9 +375,6 @@ export async function validateProductImport(rows: ProductImportRow[]): Promise<P
     if (!barcode) issues.push({ row_number: row.row_number, sku: row.sku, barcode, message: "Codigo requerido" });
     if (seenBarcodes.has(barcode)) issues.push({ row_number: row.row_number, sku: row.sku, barcode, message: "Codigo duplicado en archivo" });
     seenBarcodes.add(barcode);
-    if (demoProducts.some((product) => product.barcode === barcode || product.sku.toLowerCase() === barcode.toLowerCase())) {
-      issues.push({ row_number: row.row_number, sku: row.sku, barcode, message: "Codigo ya existe en catalogo" });
-    }
   }
   return { imported: 0, created: rows.length - issues.length, updated: 0, failed: issues.length, committed: false, issues };
 }
@@ -773,6 +770,12 @@ export async function clearActiveSaleDraft(cashierId: number): Promise<void> {
     return call<void>("active_sale_draft_clear", { cashierId });
   }
   mockActiveSaleDrafts = mockActiveSaleDrafts.filter((draft) => draft.cashier_id !== cashierId);
+}
+
+export async function markAppRecoveryClean(actorId?: number): Promise<void> {
+  if (isTauri()) {
+    return call<void>("app_recovery_mark_clean", { actorId: actorId ?? requireActorId() });
+  }
 }
 
 export async function createSale(input: {
@@ -1218,6 +1221,7 @@ export async function getAppBootstrap(): Promise<AppBootstrap> {
     held_tickets: await listHeldTickets(),
     tax_enabled: mockBoolSetting("tax_enabled", true),
     tax_prices_include_tax: mockBoolSetting("tax_prices_include_tax", true),
+    unclean_shutdown: false,
   };
 }
 
@@ -1443,9 +1447,12 @@ export async function setSetting(key: string, value: string): Promise<void> {
   mockSettings.set(key, value);
 }
 
-export async function listHardwareDevices(): Promise<HardwareDevice[]> {
+export async function listHardwareDevices(options?: { includeNetwork?: boolean }): Promise<HardwareDevice[]> {
   if (isTauri()) {
-    return call<HardwareDevice[]>("hardware_device_list", { actorId: requireActorId() });
+    return call<HardwareDevice[]>("hardware_device_list", {
+      actorId: requireActorId(),
+      includeNetwork: options?.includeNetwork ?? false,
+    });
   }
   return [
     {
@@ -1493,5 +1500,5 @@ export async function readScale(): Promise<ScaleReading> {
   if (isTauri()) {
     return call<ScaleReading>("read_scale");
   }
-  return { ok: true, weight: 1, unit: "kg", source: "demo navegador" };
+  return { ok: true, weight: 1, unit: "kg", source: "demo navegador", baud_rate: 9600 };
 }

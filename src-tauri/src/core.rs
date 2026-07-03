@@ -1,6 +1,8 @@
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Local, Utc};
 
-pub const AUTO_BACKUP_INTERVAL_HOURS: i64 = 24;
+pub fn today_local_key() -> String {
+    Local::now().format("%Y-%m-%d").to_string()
+}
 
 pub fn now_iso() -> String {
     Utc::now().to_rfc3339()
@@ -11,10 +13,7 @@ pub fn should_run_auto_backup(last_backup_at: Option<String>) -> bool {
         return true;
     };
     DateTime::parse_from_rfc3339(&last_backup_at)
-        .map(|last| {
-            Utc::now().signed_duration_since(last.with_timezone(&Utc))
-                >= Duration::hours(AUTO_BACKUP_INTERVAL_HOURS)
-        })
+        .map(|last| last.with_timezone(&Local).format("%Y-%m-%d").to_string() != today_local_key())
         .unwrap_or(true)
 }
 
@@ -43,5 +42,35 @@ pub fn average_ticket(total: f64, tickets: i64) -> f64 {
         round_money(total / tickets as f64)
     } else {
         0.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{should_run_auto_backup, today_local_key};
+    use chrono::{Duration, Local, Utc};
+
+    #[test]
+    fn auto_backup_runs_when_no_previous_backup() {
+        assert!(should_run_auto_backup(None));
+    }
+
+    #[test]
+    fn auto_backup_skips_when_backup_already_created_today() {
+        let now = Utc::now().to_rfc3339();
+        assert_eq!(
+            should_run_auto_backup(Some(now)),
+            false,
+            "same local day {} should not create backup again",
+            today_local_key()
+        );
+    }
+
+    #[test]
+    fn auto_backup_runs_when_last_backup_is_previous_local_day() {
+        let yesterday = (Local::now() - Duration::days(1))
+            .with_timezone(&Utc)
+            .to_rfc3339();
+        assert!(should_run_auto_backup(Some(yesterday)));
     }
 }

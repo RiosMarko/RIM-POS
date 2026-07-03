@@ -25,6 +25,7 @@ import {
   RecoveryDraftModal,
   ShortcutHelp,
   TicketNameModal,
+  UnexpectedShutdownModal,
 } from "./features/sales/SaleModals";
 import { SaleView } from "./features/sales/SaleView";
 import { useClock } from "./hooks/useClock";
@@ -50,6 +51,7 @@ import {
   clearActiveSaleDraft,
   getActiveSaleDraft,
   saveActiveSaleDraft,
+  markAppRecoveryClean,
   saveHeldTicket,
   searchProducts,
   needsInitialSetup,
@@ -122,6 +124,7 @@ function App() {
   const [ticketDeleteDraft, setTicketDeleteDraft] = useState<HeldTicket | null>(null);
   const [expenseOpen, setExpenseOpen] = useState(false);
   const [recoveryDraft, setRecoveryDraft] = useState<ActiveSaleDraft | null>(null);
+  const [uncleanShutdownAlert, setUncleanShutdownAlert] = useState(false);
   const [confirmDraft, setConfirmDraft] = useState<ConfirmDraft | null>(null);
   const [numberPromptDraft, setNumberPromptDraft] = useState<NumberPromptDraft | null>(null);
   const [selectedCartProductId, setSelectedCartProductId] = useState<number | null>(null);
@@ -234,6 +237,10 @@ function App() {
         setHeldTickets(bootstrap.held_tickets);
         setTaxEnabled(bootstrap.tax_enabled);
         setPricesIncludeTax(bootstrap.tax_prices_include_tax);
+        if (bootstrap.unclean_shutdown) {
+          requestView("sale");
+          setUncleanShutdownAlert(true);
+        }
       })
       .catch((error) => showToast(String(error)));
     const cancelIdle = runWhenIdle(() => {
@@ -519,6 +526,44 @@ function App() {
     await clearActiveSaleDraft(session.id);
   }, [session]);
 
+  const flushActiveDraftNow = useCallback(() => {
+    if (!session) return;
+    if (recoveryCheckedSessionRef.current !== session.id) return;
+    if (recoveryDraft || activeHeldTicketId) return;
+    if (cart.length === 0) return;
+    const items = cartToHeldItems();
+    const signature = JSON.stringify({
+      cash_session_id: summary?.open_cash_session?.id ?? null,
+      items,
+      cash_received: cashPaid,
+      card_received: cardPaid,
+      transfer_received: transferPaid,
+    });
+    if (signature === lastSavedActiveDraftRef.current) return;
+    void saveActiveSaleDraft({
+      cashier_id: session.id,
+      cash_session_id: summary?.open_cash_session?.id ?? null,
+      items,
+      cash_received: cashPaid,
+      card_received: cardPaid,
+      transfer_received: transferPaid,
+    })
+      .then(() => {
+        lastSavedActiveDraftRef.current = signature;
+      })
+      .catch((error) => console.warn("Active sale draft flush failed", error));
+  }, [
+    activeHeldTicketId,
+    cardPaid,
+    cart.length,
+    cartToHeldItems,
+    cashPaid,
+    recoveryDraft,
+    session,
+    summary?.open_cash_session?.id,
+    transferPaid,
+  ]);
+
   useEffect(() => {
     if (!session) return;
     if (recoveryCheckedSessionRef.current !== session.id) return;
@@ -574,6 +619,22 @@ function App() {
     summary?.open_cash_session?.id,
     transferPaid,
   ]);
+
+  useEffect(() => {
+    if (!session) return;
+    const handlePageHide = () => {
+      flushActiveDraftNow();
+      void markAppRecoveryClean(session.id).catch((error) => {
+        console.warn("Recovery clean mark failed", error);
+      });
+    };
+    window.addEventListener("pagehide", handlePageHide);
+    window.addEventListener("beforeunload", handlePageHide);
+    return () => {
+      window.removeEventListener("pagehide", handlePageHide);
+      window.removeEventListener("beforeunload", handlePageHide);
+    };
+  }, [flushActiveDraftNow, session]);
 
   const persistActiveHeldTicket = useCallback(async () => {
     if (!session || !activeHeldTicketId || cart.length === 0) return;
@@ -700,6 +761,7 @@ function App() {
       setActiveHeldTicketId(null);
       lastSavedActiveDraftRef.current = "recovered";
       setRecoveryDraft(null);
+      setUncleanShutdownAlert(false);
       requestView("sale");
       showToast("Venta pendiente recuperada");
       searchRef.current?.focus();
@@ -712,6 +774,8 @@ function App() {
     try {
       await clearActiveDraftForSession();
       setRecoveryDraft(null);
+      setUncleanShutdownAlert(false);
+      requestView("sale");
       showToast("Venta pendiente descartada");
       searchRef.current?.focus();
     } catch (error) {
@@ -862,6 +926,7 @@ function App() {
     await enterLoginMode(async () => {
       try {
         await clearActiveDraftForSession();
+        await markAppRecoveryClean(session?.id);
       } catch (error) {
         console.warn("Active sale draft clear failed", error);
       }
@@ -991,7 +1056,18 @@ function App() {
             onConfirm={() => removeHeldTicket(ticketDeleteDraft)}
           />
         )}
-        {recoveryDraft && (
+        {uncleanShutdownAlert && (
+          <UnexpectedShutdownModal
+            hasDraft={Boolean(recoveryDraft)}
+            onRecover={recoverActiveSaleDraft}
+            onDiscard={discardActiveSaleDraft}
+            onContinue={() => {
+              requestView("sale");
+              setUncleanShutdownAlert(false);
+            }}
+          />
+        )}
+        {recoveryDraft && !uncleanShutdownAlert && (
           <RecoveryDraftModal
             draft={recoveryDraft}
             onRecover={recoverActiveSaleDraft}

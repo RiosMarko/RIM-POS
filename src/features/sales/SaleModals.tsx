@@ -1,4 +1,4 @@
-import { Archive, Ticket, Trash2 } from "lucide-react";
+import { AlertTriangle, Archive, Ticket, Trash2 } from "lucide-react";
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { formatDateTimeMx } from "../../lib/date";
 import { money } from "../../lib/money";
@@ -234,6 +234,58 @@ export function RecoveryDraftModal({
           <button className="primary-button" type="button" onClick={onRecover}>
             Recuperar
           </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+export function UnexpectedShutdownModal({
+  hasDraft,
+  onRecover,
+  onDiscard,
+  onContinue,
+}: {
+  hasDraft: boolean;
+  onRecover: () => void;
+  onDiscard: () => void;
+  onContinue: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="ticket-name-modal" role="dialog" aria-modal="true" aria-label="Cierre inesperado detectado">
+        <div className="modal-title danger-title">
+          <AlertTriangle size={22} />
+          <div>
+            <h2>Cierre inesperado detectado</h2>
+            <p>App no cerro normal. Revisa venta pendiente, caja y ultimo backup antes de seguir.</p>
+          </div>
+        </div>
+        <div className="recovery-summary">
+          <div>
+            <span>Estado</span>
+            <strong>{hasDraft ? "Venta pendiente encontrada" : "Sin venta pendiente guardada"}</strong>
+          </div>
+          <div>
+            <span>Accion</span>
+            <strong>{hasDraft ? "Recuperar o descartar antes de seguir" : "Validar operacion y continuar"}</strong>
+          </div>
+        </div>
+        <div className="modal-actions">
+          {hasDraft ? (
+            <>
+              <button className="ghost-button" type="button" onClick={onDiscard}>
+                Descartar venta
+              </button>
+              <button className="primary-button" type="button" onClick={onRecover}>
+                Recuperar venta
+              </button>
+            </>
+          ) : (
+            <button className="primary-button" type="button" onClick={onContinue}>
+              Entendido
+            </button>
+          )}
         </div>
       </section>
     </div>

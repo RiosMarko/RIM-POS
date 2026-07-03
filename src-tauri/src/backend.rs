@@ -36,6 +36,8 @@ struct AppState {
 type CommandResult<T> = Result<T, String>;
 
 const AUTO_BACKUP_LAST_SETTING: &str = "auto_backup_last_at";
+const APP_RECOVERY_DIRTY_SETTING: &str = "app_recovery_dirty";
+const APP_RECOVERY_LAST_MARKED_AT_SETTING: &str = "app_recovery_last_marked_at";
 
 #[derive(Debug, Serialize)]
 struct Product {
@@ -390,6 +392,7 @@ struct ScaleReading {
     weight: f64,
     unit: String,
     source: String,
+    baud_rate: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -408,6 +411,7 @@ struct AppBootstrap {
     held_tickets: Vec<HeldTicket>,
     tax_enabled: bool,
     tax_prices_include_tax: bool,
+    unclean_shutdown: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -865,6 +869,7 @@ fn import_products_with_conn(
         let name = row.name.trim();
         let category = row.category.trim();
         let unit = row.unit.trim();
+        let _requested_active = row.active;
 
         if let Err(message) = validate_required_text(barcode, 1, "Codigo requerido") {
             issues.push(product_import_issue(&row, message));
@@ -921,7 +926,7 @@ fn import_products_with_conn(
                 min_stock: row.min_stock,
                 tax_rate: row.tax_rate,
                 tax_ids: row.tax_ids,
-                active: row.active,
+                active: true,
             }),
             Err(message) => issues.push(product_import_issue(&row, message)),
         }
@@ -2953,8 +2958,7 @@ fn product_bulk_validate(
             continue;
         }
         match existing_product_id_for_import(&conn, barcode, barcode) {
-            Ok(Some(_)) => issues.push(product_import_issue(row, "Codigo ya existe en catalogo")),
-            Ok(None) => {}
+            Ok(_) => {}
             Err(message) => issues.push(product_import_issue(row, message)),
         }
     }
@@ -5213,13 +5217,52 @@ fn app_bootstrap(state: State<'_, AppState>, actor_id: i64) -> CommandResult<App
     let held_tickets = held_ticket_list_with_conn(&conn)?;
     let tax_enabled = setting_bool(&conn, "tax_enabled", true)?;
     let tax_prices_include_tax = setting_bool(&conn, "tax_prices_include_tax", true)?;
+    let unclean_shutdown = setting_bool(&conn, APP_RECOVERY_DIRTY_SETTING, false)?;
+    let now = now_iso();
+    conn.execute(
+        "INSERT INTO app_settings (key, value, updated_at)
+         VALUES (?1, 'true', ?2)
+         ON CONFLICT(key) DO UPDATE SET value = 'true', updated_at = excluded.updated_at",
+        params![APP_RECOVERY_DIRTY_SETTING, now],
+    )
+    .map_err(|error| error.to_string())?;
+    conn.execute(
+        "INSERT INTO app_settings (key, value, updated_at)
+         VALUES (?1, ?2, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        params![APP_RECOVERY_LAST_MARKED_AT_SETTING, now],
+    )
+    .map_err(|error| error.to_string())?;
     Ok(AppBootstrap {
         summary,
         products,
         held_tickets,
         tax_enabled,
         tax_prices_include_tax,
+        unclean_shutdown,
     })
+}
+
+#[tauri::command]
+fn app_recovery_mark_clean(state: State<'_, AppState>, actor_id: i64) -> CommandResult<()> {
+    let conn = state.db.lock().map_err(|error| error.to_string())?;
+    require_active_user(&conn, actor_id)?;
+    let now = now_iso();
+    conn.execute(
+        "INSERT INTO app_settings (key, value, updated_at)
+         VALUES (?1, 'false', ?2)
+         ON CONFLICT(key) DO UPDATE SET value = 'false', updated_at = excluded.updated_at",
+        params![APP_RECOVERY_DIRTY_SETTING, now],
+    )
+    .map_err(|error| error.to_string())?;
+    conn.execute(
+        "INSERT INTO app_settings (key, value, updated_at)
+         VALUES (?1, ?2, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        params![APP_RECOVERY_LAST_MARKED_AT_SETTING, now],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -5638,11 +5681,12 @@ fn report_movement_history(
 fn hardware_device_list(
     state: State<'_, AppState>,
     actor_id: i64,
+    include_network: Option<bool>,
 ) -> CommandResult<Vec<HardwareDevice>> {
     let conn = state.db.lock().map_err(|error| error.to_string())?;
     require_admin(&conn, actor_id)?;
     drop(conn);
-    Ok(device_list())
+    Ok(device_list(include_network.unwrap_or(false)))
 }
 
 fn ticket_setting(conn: &Connection, key: &str, default: &str) -> CommandResult<String> {
@@ -5857,13 +5901,36 @@ fn read_scale(state: State<'_, AppState>) -> CommandResult<ScaleReading> {
     let conn = state.db.lock().map_err(|error| error.to_string())?;
     let scale = setting_string(&conn, "scale")?.unwrap_or_default();
     let baud_rate = ticket_setting_i64(&conn, "scale_baud_rate", 9600, 1200, 115200)? as u32;
-    drop(conn);
-    let (weight, raw) = read_serial_scale(&scale, baud_rate, 1200)?;
+    let mut candidates = vec![baud_rate, 9600, 4800, 2400, 19200, 38400];
+    candidates.dedup();
+    let mut last_error = None;
+    let mut result = None;
+    for candidate in candidates {
+        match read_serial_scale(&scale, candidate, 1200) {
+            Ok((weight, raw)) => {
+                result = Some((weight, raw, candidate));
+                break;
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    let (weight, raw, detected_baud_rate) =
+        result.ok_or_else(|| last_error.unwrap_or_else(|| "No se pudo leer bascula".into()))?;
+    if detected_baud_rate != baud_rate {
+        conn.execute(
+            "INSERT INTO app_settings (key, value, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params!["scale_baud_rate", detected_baud_rate.to_string(), now_iso()],
+        )
+        .map_err(|error| error.to_string())?;
+    }
     Ok(ScaleReading {
         ok: true,
         weight,
         unit: "kg".into(),
         source: raw,
+        baud_rate: detected_baud_rate,
     })
 }
 
@@ -6289,6 +6356,46 @@ mod tests {
     }
 
     #[test]
+    fn product_bulk_import_updates_and_reactivates_existing_product() {
+        let mut conn = flow_conn();
+        conn.execute(
+            "UPDATE products SET active = 0, stock = 5, price = 20 WHERE id = 1",
+            [],
+        )
+        .unwrap();
+
+        let result = import_products_with_conn(
+            &mut conn,
+            vec![ProductImportRow {
+                row_number: 2,
+                sku: "IGNORED".into(),
+                barcode: "750000000001".into(),
+                name: "Producto actualizado".into(),
+                category: "Bebidas".into(),
+                unit: "pieza".into(),
+                price: 25.0,
+                wholesale_price: None,
+                cost: 12.0,
+                stock: 30.0,
+                min_stock: 2.0,
+                tax_rate: 0.0,
+                tax_ids: vec![],
+                active: false,
+            }],
+        )
+        .unwrap();
+
+        assert!(result.committed);
+        assert_eq!(result.created, 0);
+        assert_eq!(result.updated, 1);
+        let product = get_product(&conn, 1).unwrap();
+        assert_eq!(product.name, "Producto actualizado");
+        assert_eq!(product.stock, 30.0);
+        assert_eq!(product.price, 25.0);
+        assert!(product.active);
+    }
+
+    #[test]
     fn mixed_payment_change_comes_from_cash_only() {
         let mut conn = flow_conn();
         let session = open_cash_session_with_conn(&conn, 2, 100.0).unwrap();
@@ -6547,6 +6654,7 @@ pub fn run() {
             cash_count_list,
             dashboard_summary,
             app_bootstrap,
+            app_recovery_mark_clean,
             report_summary,
             report_product_sales,
             report_unsold_products,
