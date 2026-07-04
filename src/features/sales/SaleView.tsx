@@ -88,6 +88,7 @@ export function SaleView({
 }) {
   const selectedLineRef = useRef<HTMLDivElement>(null);
   const [selectedSuggestionIndex, setSelectedSuggestionIndex] = useState(0);
+  const [quantityDrafts, setQuantityDrafts] = useState<Record<number, string>>({});
   const normalizedQuery = useMemo(() => query.trim().toLowerCase(), [query]);
   const visibleSuggestions = useMemo(() => {
     if (!normalizedQuery) return [];
@@ -237,10 +238,31 @@ export function SaleView({
                     className="number-input"
                     type="number"
                     min="0"
-                    step={line.product.unit === "kg" ? "0.001" : "1"}
-                    value={line.quantity}
-                    onFocus={selectNumericInput}
-                    onChange={(event) => updateLine(line.product.id, { quantity: Number(event.target.value) })}
+                    step={line.product.unit === "pieza" ? "1" : "0.001"}
+                    value={quantityDrafts[line.product.id] ?? String(line.quantity)}
+                    onFocus={(event) => {
+                      setQuantityDrafts((current) => ({ ...current, [line.product.id]: String(line.quantity) }));
+                      selectNumericInput(event);
+                    }}
+                    onChange={(event) => {
+                      const text = event.target.value;
+                      setQuantityDrafts((current) => ({ ...current, [line.product.id]: text }));
+                      const parsed = Number(text);
+                      // Skip zero/invalid mid-typing values (e.g. leading "0" before "0.456")
+                      // so the line isn't deleted while the user is still typing a decimal.
+                      if (Number.isFinite(parsed) && parsed > 0) {
+                        updateLine(line.product.id, { quantity: parsed });
+                      }
+                    }}
+                    onBlur={() => {
+                      const parsed = Number(quantityDrafts[line.product.id]);
+                      updateLine(line.product.id, { quantity: Number.isFinite(parsed) && parsed > 0 ? parsed : 0 });
+                      setQuantityDrafts((current) => {
+                        const next = { ...current };
+                        delete next[line.product.id];
+                        return next;
+                      });
+                    }}
                   />
                   <span className="money-cell">{money(line.product.price)}</span>
                   <input
@@ -329,7 +351,7 @@ export function SaleView({
             )}
           </label>
           <label className="field-label">
-            Crédito
+            Transferencia
             <input
               className="mini-money-input"
               type="number"

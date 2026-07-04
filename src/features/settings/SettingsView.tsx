@@ -14,6 +14,7 @@ export function SettingsView({
   onTaxModeChange: (mode: { enabled: boolean; pricesIncludeTax: boolean }) => void;
 }) {
   const [printer, setPrinter] = useState("mock-printer-80mm");
+  const [cutPrinter, setCutPrinter] = useState("");
   const [scale, setScale] = useState("mock-scale-serial");
   const [scaleBaudRate, setScaleBaudRate] = useState(9600);
   const [drawer, setDrawer] = useState("mock-drawer-escpos");
@@ -42,9 +43,11 @@ export function SettingsView({
   const [cardTerminalDraft, setCardTerminalDraft] = useState("");
   const [devices, setDevices] = useState<HardwareDevice[]>([]);
   const [detecting, setDetecting] = useState(false);
+  const [scanNetwork, setScanNetwork] = useState(false);
 
   const settingsKeys = useMemo(() => [
     "printer",
+    "cut_printer",
     "workstation_id",
     "scale",
     "scale_baud_rate",
@@ -71,6 +74,7 @@ export function SettingsView({
 
   const printers = useMemo(() => devices.filter((device) => device.device_type === "printer"), [devices]);
   const serialDevices = useMemo(() => devices.filter((device) => device.device_type === "serial"), [devices]);
+  const unconfiguredDevices = useMemo(() => devices.filter((device) => device.device_type === "unconfigured"), [devices]);
   const printerDevices = useMemo(() => {
     const byId = new Map<string, HardwareDevice>();
     [...printers, ...serialDevices].forEach((device) => byId.set(device.id, device));
@@ -117,24 +121,26 @@ export function SettingsView({
   const detectDevices = useCallback(async (options?: { silent?: boolean }) => {
     setDetecting(true);
     try {
-      const result = await listHardwareDevices({ includeNetwork: true });
+      const result = await listHardwareDevices({ includeNetwork: scanNetwork });
       setDevices(result);
       await syncDetectedDevices(result, { printer, scale, drawer });
       if (!options?.silent) {
-        showToast(result.length ? `${result.length} dispositivos detectados` : "Sin dispositivos reales detectados");
+        const usable = result.filter((device) => device.device_type !== "unconfigured");
+        showToast(usable.length ? `${usable.length} dispositivos detectados` : "Sin dispositivos reales detectados");
       }
     } catch (error) {
       if (!options?.silent) showToast(String(error));
     } finally {
       setDetecting(false);
     }
-  }, [drawer, printer, scale, showToast]);
+  }, [drawer, printer, scale, scanNetwork, showToast]);
 
   useEffect(() => {
     setCardTerminals(loadCardTerminals());
     getSettings(settingsKeys)
       .then((settings) => {
         const nextPrinter = settings.printer;
+        const nextCutPrinter = settings.cut_printer;
         const nextWorkstationId = settings.workstation_id;
         const nextScale = settings.scale;
         const nextScaleBaudRate = settings.scale_baud_rate;
@@ -163,6 +169,7 @@ export function SettingsView({
           drawer: nextDrawer || "mock-drawer-escpos",
         };
         setPrinter(nextHardware.printer);
+        setCutPrinter(nextCutPrinter || "");
         setWorkstationId(nextWorkstationId || "CAJA-1");
         setScale(nextHardware.scale);
         setScaleBaudRate(Number(nextScaleBaudRate ?? 9600));
@@ -253,6 +260,7 @@ export function SettingsView({
     try {
       await setSettings({
         printer,
+        cut_printer: cutPrinter,
         workstation_id: workstationId.trim() || "CAJA-1",
         scale,
         scale_baud_rate: String(scaleBaudRate),
@@ -293,6 +301,7 @@ export function SettingsView({
   const saveHardwareSettings = async () => {
     await setSettings({
       printer,
+      cut_printer: cutPrinter,
       scale,
       scale_baud_rate: String(scaleBaudRate),
       drawer,
@@ -556,6 +565,17 @@ export function SettingsView({
                 </select>
               </label>
               <label>
+                Impresora corte
+                <select value={cutPrinter} onChange={(event) => setCutPrinter(event.target.value)}>
+                  <option value="">Usar la misma que ticket</option>
+                  {printerDevices.map((device) => (
+                    <option value={device.id} key={`cut-${device.id}`}>
+                      {device.device_type === "serial" ? `Directo por ${deviceLabel(device)}` : deviceLabel(device)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
                 Bascula
                 <select value={scale} onChange={(event) => setScale(event.target.value)}>
                   <option value="">Seleccionar puerto</option>
@@ -600,6 +620,20 @@ export function SettingsView({
               <button className="ghost-button" type="button" onClick={testScale}>Probar bascula</button>
               <button className="ghost-button" type="button" onClick={testDrawer}>Probar cajon</button>
             </div>
+            <label className="toggle-row">
+              <input
+                type="checkbox"
+                checked={scanNetwork}
+                onChange={(event) => setScanNetwork(event.target.checked)}
+              />
+              Incluir impresoras de red (mas lento, escanea la red local)
+            </label>
+            {unconfiguredDevices.length > 0 && (
+              <div className="muted-note">
+                Detectados sin driver instalado: {unconfiguredDevices.map((device) => device.name).join(", ")}.
+                Instala el driver del fabricante en Windows para poder usarlos.
+              </div>
+            )}
           </section>
 
           <section className="settings-section">
@@ -649,6 +683,7 @@ export function SettingsView({
           <div className="settings-list">
             <Setting icon={Archive} label="Caja/estacion" value={workstationId || "CAJA-1"} />
             <Setting icon={Printer} label="Impresora ticket" value={selectedDeviceName(printer)} />
+            <Setting icon={Printer} label="Impresora corte" value={cutPrinter ? selectedDeviceName(cutPrinter) : "Misma que ticket"} />
             <Setting icon={Scale} label="Bascula" value={selectedDeviceName(scale)} />
             <Setting icon={Archive} label="Cajon" value={selectedDeviceName(drawer)} />
             <Setting icon={CreditCard} label="Terminales" value={`${cardTerminals.length}`} />

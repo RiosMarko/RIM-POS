@@ -1,8 +1,9 @@
-import { BarChart3, Banknote, CalendarDays, FileText, Printer, ShoppingCart } from "lucide-react";
+import { BarChart3, Banknote, CalendarDays, Download, FileText, Printer, ShoppingCart } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Metric } from "../../components/display/SummaryCards";
 import type { ConfirmDraft } from "../../components/modals/CommonModals";
 import { AdminGate } from "../auth/AuthScreens";
+import { downloadCsv, type CsvCell } from "../../lib/csv";
 import { formatDateMx, formatTimeMx } from "../../lib/date";
 import { money } from "../../lib/money";
 import {
@@ -22,6 +23,107 @@ import {
 } from "../../lib/posApi";
 import type { AuditLogEntry, CashCount, CashMovement, CashSession, DailyCutSummary, SaleListItem, ShiftCutSnapshot, UserSession } from "../../types";
 import { CashDialog, SaleCancelModal } from "./CashModals";
+
+function shiftCutCsvRows(snapshot: ShiftCutSnapshot, canViewProfit: boolean): CsvCell[][] {
+  const rows: CsvCell[][] = [
+    ["Corte de turno", `#${snapshot.shift_id}`],
+    ["Cajero", snapshot.opened_by_name ?? ""],
+    ["Cerrado por", snapshot.closed_by_name ?? ""],
+    ["Caja", snapshot.workstation_id ?? ""],
+    ["Apertura", snapshot.opened_at],
+    ["Cierre", snapshot.closed_at ?? ""],
+    ["Duracion (min)", snapshot.duration_minutes ?? 0],
+    ["Tickets", snapshot.total_tickets],
+    ["Cancelados", snapshot.canceled_tickets],
+    ["Ventas netas", snapshot.net_sales],
+  ];
+  if (canViewProfit) rows.push(["Ganancia", snapshot.gross_profit ?? 0]);
+  rows.push(
+    ["Impuestos", snapshot.tax],
+    ["Descuentos", snapshot.discount],
+    ["Ventas a credito", snapshot.credit_sales ?? 0],
+    ["Fondo inicial", snapshot.opening_cash],
+    ["Entradas", snapshot.cash_entries_total ?? 0],
+    ["Salidas", snapshot.cash_out_total ?? 0],
+    ["Devoluciones efectivo", snapshot.cash_refunds_total ?? 0],
+    ["Abonos credito efectivo", snapshot.credit_payments_total ?? 0],
+    ["Esperado", snapshot.expected_cash],
+    ["Contado", snapshot.counted_cash ?? ""],
+    ["Diferencia", snapshot.cash_difference ?? ""],
+    [],
+    ["Forma de pago", "Monto"],
+  );
+  (snapshot.payment_breakdown ?? []).forEach((payment) => rows.push([payment.label, payment.amount]));
+  rows.push([], canViewProfit ? ["Departamento", "Cantidad", "Ventas", "Ganancia"] : ["Departamento", "Cantidad", "Ventas"]);
+  (snapshot.departments ?? []).forEach((department) => {
+    const row: CsvCell[] = [department.category, department.quantity, department.total_sales];
+    if (canViewProfit) row.push(department.gross_profit);
+    rows.push(row);
+  });
+  rows.push([], ["Movimientos de caja", "Monto", "Motivo", "Cajero", "Fecha"]);
+  (snapshot.cash_movements ?? []).forEach((movement) => rows.push([movement.movement_type, movement.amount, movement.reason, movement.actor_name, movement.created_at]));
+  rows.push([], ["Devoluciones", "Monto", "Efectivo", "Motivo", "Fecha"]);
+  (snapshot.refunds ?? []).forEach((refund) => rows.push([refund.folio, refund.amount, refund.cash_amount, refund.reason, refund.created_at]));
+  rows.push([], ["Abonos credito", "Forma de pago", "Monto", "Motivo", "Fecha"]);
+  (snapshot.credit_payments ?? []).forEach((payment) => rows.push([payment.customer_name, payment.payment_method, payment.amount, payment.reason, payment.created_at]));
+  rows.push([], ["Impuestos", "Tasa", "Ventas gravadas", "Cobrado"]);
+  (snapshot.taxes ?? []).forEach((tax) => rows.push([tax.tax_name, tax.rate, tax.taxable_sales, tax.tax_collected]));
+  rows.push([], ["Top clientes por venta", "Ventas", "Tickets"]);
+  (snapshot.top_customers_by_sales ?? []).forEach((customer) => rows.push([customer.customer_name, customer.total_sales, customer.ticket_count]));
+  if (canViewProfit) {
+    rows.push([], ["Top clientes por ganancia", "Ganancia"]);
+    (snapshot.top_customers_by_profit ?? []).forEach((customer) => rows.push([customer.customer_name, customer.gross_profit]));
+  }
+  return rows;
+}
+
+function dailyCutCsvRows(summary: DailyCutSummary, canViewProfit: boolean): CsvCell[][] {
+  const rows: CsvCell[][] = [
+    ["Corte general", summary.date],
+    ["Turnos cerrados", summary.cut_count],
+    ["Tickets", summary.total_tickets],
+    ["Cancelados", summary.canceled_tickets],
+    ["Ventas netas", summary.net_sales],
+  ];
+  if (canViewProfit) rows.push(["Ganancia", summary.gross_profit ?? 0]);
+  rows.push(
+    ["Impuestos", summary.tax],
+    ["Descuentos", summary.discount],
+    ["Ventas a credito", summary.credit_sales ?? 0],
+    ["Fondo inicial", summary.opening_cash],
+    ["Entradas", summary.cash_entries_total ?? 0],
+    ["Salidas", summary.cash_out_total ?? 0],
+    ["Devoluciones efectivo", summary.cash_refunds_total ?? 0],
+    ["Abonos credito efectivo", summary.credit_payments_total ?? 0],
+    ["Esperado", summary.expected_cash],
+    ["Contado", summary.counted_cash],
+    ["Diferencia", summary.cash_difference],
+    [],
+    ["Forma de pago", "Monto"],
+  );
+  (summary.payment_breakdown ?? []).forEach((payment) => rows.push([payment.label, payment.amount]));
+  rows.push([], canViewProfit ? ["Departamento", "Cantidad", "Ventas", "Ganancia"] : ["Departamento", "Cantidad", "Ventas"]);
+  (summary.departments ?? []).forEach((department) => {
+    const row: CsvCell[] = [department.category, department.quantity, department.total_sales];
+    if (canViewProfit) row.push(department.gross_profit);
+    rows.push(row);
+  });
+  rows.push([], ["Devoluciones", "Monto", "Efectivo", "Motivo", "Fecha"]);
+  (summary.refunds ?? []).forEach((refund) => rows.push([refund.folio, refund.amount, refund.cash_amount, refund.reason, refund.created_at]));
+  rows.push([], ["Abonos credito", "Forma de pago", "Monto", "Motivo", "Fecha"]);
+  (summary.credit_payments ?? []).forEach((payment) => rows.push([payment.customer_name, payment.payment_method, payment.amount, payment.reason, payment.created_at]));
+  rows.push([], ["Impuestos", "Tasa", "Ventas gravadas", "Cobrado"]);
+  (summary.taxes ?? []).forEach((tax) => rows.push([tax.tax_name, tax.rate, tax.taxable_sales, tax.tax_collected]));
+  rows.push([], ["Top clientes por venta", "Ventas", "Tickets"]);
+  (summary.top_customers_by_sales ?? []).forEach((customer) => rows.push([customer.customer_name, customer.total_sales, customer.ticket_count]));
+  if (canViewProfit) {
+    rows.push([], ["Top clientes por ganancia", "Ganancia"]);
+    (summary.top_customers_by_profit ?? []).forEach((customer) => rows.push([customer.customer_name, customer.gross_profit]));
+  }
+  rows.push([], ["Turnos incluidos", "Cajero", "Ventas netas", "Diferencia"]);
+  summary.cuts.forEach((cut) => rows.push([`#${cut.shift_id}`, cut.closed_by_name ?? cut.opened_by_name ?? "", cut.net_sales, cut.cash_difference ?? ""]));
+  return rows;
+}
 
 export function CashView({
   session,
@@ -247,15 +349,26 @@ export function CashView({
               <h2>Corte general {formatDateMx(`${dailyCut.date}T00:00:00`)}</h2>
               <p>{dailyCut.cut_count} turnos cerrados, no modifica cajas ni ventas.</p>
             </div>
-            <button
-              className="ghost-button"
-              type="button"
-              disabled={dailyCut.cut_count === 0}
-              onClick={() => printDailyCut(dailyCut.date).then((result) => showToast(result.message)).catch((error) => showToast(String(error)))}
-            >
-              <Printer size={16} />
-              Imprimir general
-            </button>
+            <div className="cut-detail-actions">
+              <button
+                className="ghost-button"
+                type="button"
+                disabled={dailyCut.cut_count === 0}
+                onClick={() => downloadCsv(`corte-general-${dailyCut.date}.csv`, dailyCutCsvRows(dailyCut, canViewProfit))}
+              >
+                <Download size={16} />
+                Exportar
+              </button>
+              <button
+                className="ghost-button"
+                type="button"
+                disabled={dailyCut.cut_count === 0}
+                onClick={() => printDailyCut(dailyCut.date).then((result) => showToast(result.message)).catch((error) => showToast(String(error)))}
+              >
+                <Printer size={16} />
+                Imprimir general
+              </button>
+            </div>
           </div>
           <div className="cut-kpi-grid">
             <div className="cut-kpi primary">
@@ -340,7 +453,7 @@ export function CashView({
               ))}
             </div>
             <div className="cut-detail-section">
-              <h3>Top clientes</h3>
+              <h3>Top clientes por venta</h3>
               {(dailyCut.top_customers_by_sales ?? []).length === 0 ? (
                 <span className="muted-note">Sin clientes identificados</span>
               ) : (dailyCut.top_customers_by_sales ?? []).map((customer) => (
@@ -350,6 +463,19 @@ export function CashView({
                 </div>
               ))}
             </div>
+            {canViewProfit && (
+              <div className="cut-detail-section">
+                <h3>Top clientes por ganancia</h3>
+                {(dailyCut.top_customers_by_profit ?? []).length === 0 ? (
+                  <span className="muted-note">Sin clientes identificados</span>
+                ) : (dailyCut.top_customers_by_profit ?? []).map((customer) => (
+                  <div className="cut-line" key={`profit-${customer.customer_id}`}>
+                    <span>{customer.customer_name}</span>
+                    <strong>{money(customer.gross_profit)}</strong>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -368,14 +494,24 @@ export function CashView({
                 {cutSnapshot.closed_by_name ? `, cerrado por ${cutSnapshot.closed_by_name}` : ", turno actual"}
               </p>
             </div>
-            <button
-              className="ghost-button"
-              type="button"
-              onClick={() => printShiftCut(cutSnapshot.shift_id).then((result) => showToast(result.message)).catch((error) => showToast(String(error)))}
-            >
-              <Printer size={16} />
-              Imprimir corte
-            </button>
+            <div className="cut-detail-actions">
+              <button
+                className="ghost-button"
+                type="button"
+                onClick={() => downloadCsv(`corte-turno-${cutSnapshot.shift_id}.csv`, shiftCutCsvRows(cutSnapshot, canViewProfit))}
+              >
+                <Download size={16} />
+                Exportar
+              </button>
+              <button
+                className="ghost-button"
+                type="button"
+                onClick={() => printShiftCut(cutSnapshot.shift_id).then((result) => showToast(result.message)).catch((error) => showToast(String(error)))}
+              >
+                <Printer size={16} />
+                Imprimir corte
+              </button>
+            </div>
           </div>
           <div className="cut-kpi-grid">
             <div className="cut-kpi primary">
@@ -462,7 +598,7 @@ export function CashView({
               ))}
             </div>
             <div className="cut-detail-section">
-              <h3>Top clientes</h3>
+              <h3>Top clientes por venta</h3>
               {(cutSnapshot.top_customers_by_sales ?? []).length === 0 ? (
                 <span className="muted-note">Sin clientes identificados</span>
               ) : (cutSnapshot.top_customers_by_sales ?? []).map((customer) => (
@@ -472,6 +608,19 @@ export function CashView({
                 </div>
               ))}
             </div>
+            {canViewProfit && (
+              <div className="cut-detail-section">
+                <h3>Top clientes por ganancia</h3>
+                {(cutSnapshot.top_customers_by_profit ?? []).length === 0 ? (
+                  <span className="muted-note">Sin clientes identificados</span>
+                ) : (cutSnapshot.top_customers_by_profit ?? []).map((customer) => (
+                  <div className="cut-line" key={`customer-profit-${customer.customer_id}`}>
+                    <span>{customer.customer_name}</span>
+                    <strong>{money(customer.gross_profit)}</strong>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -490,7 +639,7 @@ export function CashView({
               <strong>{sale.folio}</strong>
               <span>{sale.cashier_name}</span>
               <span>{money(sale.total)}</span>
-              <span>E {money(sale.cash_paid ?? 0)} / Tar {money(sale.card_paid ?? 0)} / Crédito {money(sale.transfer_paid ?? 0)}</span>
+              <span>E {money(sale.cash_paid ?? 0)} / Tar {money(sale.card_paid ?? 0)} / Transf {money(sale.transfer_paid ?? 0)}</span>
               <span>{sale.status === "paid" ? "Pagada" : "Cancelada"}</span>
               <button className="danger-button mini" type="button" disabled={sale.status !== "paid"} onClick={() => setCancelDraft(sale)}>
                 Cancelar

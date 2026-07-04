@@ -1,9 +1,19 @@
 mod auth;
 mod backend;
+mod cash;
 mod backup;
 mod core;
+mod customers;
 mod hardware;
+mod invoices;
+mod migrations;
+mod models;
+mod products;
+mod purchases;
+mod reports;
+mod sales;
 mod security;
+mod users;
 mod settings_access;
 mod validation;
 

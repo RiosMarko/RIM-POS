@@ -408,7 +408,7 @@ export type HardwareResult = {
   message: string;
 };
 
-export type HardwareDeviceType = "printer" | "serial" | "scale" | "cash_drawer";
+export type HardwareDeviceType = "printer" | "serial" | "scale" | "cash_drawer" | "unconfigured";
 
 export type HardwareDevice = {
   id: string;

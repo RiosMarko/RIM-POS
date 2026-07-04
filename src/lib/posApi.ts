@@ -806,7 +806,7 @@ export async function createSale(input: {
     return sum + lineAmounts(item.quantity * item.unit_price, item.discount, product?.tax_rate ?? 0).tax;
   }, 0);
   const total = Math.round((subtotal + tax) * 100) / 100;
-  const paid = input.payments.reduce((sum, payment) => sum + payment.amount, 0);
+  const paid = Math.round(input.payments.reduce((sum, payment) => sum + payment.amount, 0) * 100) / 100;
   if (paid < total) throw new Error("Pago insuficiente");
   const cashPaid = input.payments.filter((payment) => payment.method === "cash").reduce((sum, payment) => sum + payment.amount, 0);
   const nonCashPaid = paid - cashPaid;
@@ -1358,7 +1358,7 @@ export async function listReportMovements(filters?: { fromDate?: string; toDate?
       id: `sale-${sale.id}`,
       kind: "sale" as const,
       title: sale.status === "paid" ? `Venta ${sale.folio}` : `Cancelacion ${sale.folio}`,
-      detail: `${sale.cashier_name} · efectivo ${sale.cash_paid ?? 0} · tarjeta ${sale.card_paid ?? 0} · crédito ${sale.transfer_paid ?? 0}`,
+      detail: `${sale.cashier_name} · efectivo ${sale.cash_paid ?? 0} · tarjeta ${sale.card_paid ?? 0} · transferencia ${sale.transfer_paid ?? 0}`,
       amount: sale.status === "paid" ? sale.total : -sale.total,
       gross_profit: 0,
       cash_paid: sale.cash_paid ?? 0,

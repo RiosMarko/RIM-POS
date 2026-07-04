@@ -236,7 +236,7 @@ export function eleventaRowsFromProducts(products: Product[], taxOptions: TaxOpt
         product.stock,
         product.min_stock,
         0,
-        product.unit === "kg" ? "GRANEL" : "UNIDAD",
+        product.unit === "pieza" ? "UNIDAD" : "GRANEL",
         iva,
         ieps || "",
       ];

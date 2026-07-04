@@ -326,7 +326,7 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
   const paymentSummary = [
     { label: "Efectivo", value: saleMovements.reduce((sum, movement) => sum + (movement.cash_paid ?? 0), 0), className: "cash" },
     { label: "Tarjeta", value: saleMovements.reduce((sum, movement) => sum + (movement.card_paid ?? 0), 0), className: "card" },
-    { label: "Credito", value: saleMovements.reduce((sum, movement) => sum + (movement.transfer_paid ?? 0), 0), className: "credit" },
+    { label: "Transferencia", value: saleMovements.reduce((sum, movement) => sum + (movement.transfer_paid ?? 0), 0), className: "credit" },
   ];
   const paymentTotal = Math.max(1, paymentSummary.reduce((sum, item) => sum + item.value, 0));
 

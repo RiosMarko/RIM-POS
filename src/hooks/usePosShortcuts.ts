@@ -68,9 +68,9 @@ export function usePosShortcuts({
         }
         if ((key === "+" || key === "=" || key === "-") && selectedLine) {
           event.preventDefault();
-          const step = selectedLine.product.unit === "kg" ? 0.001 : 1;
+          const step = selectedLine.product.unit === "pieza" ? 1 : 0.001;
           const direction = key === "-" ? -1 : 1;
-          const decimals = selectedLine.product.unit === "kg" ? 3 : 0;
+          const decimals = selectedLine.product.unit === "pieza" ? 0 : 3;
           const quantity = Number((selectedLine.quantity + step * direction).toFixed(decimals));
           updateLine(selectedLine.product.id, { quantity });
           return;

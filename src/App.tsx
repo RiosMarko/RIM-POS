@@ -151,8 +151,8 @@ function App() {
   const cashPaid = Number(cashReceived) || 0;
   const cardPaid = Number(cardReceived) || 0;
   const transferPaid = Number(transferReceived) || 0;
-  const paid = cashPaid + cardPaid + transferPaid;
-  const nonCashPaid = cardPaid + transferPaid;
+  const paid = roundMoney(cashPaid + cardPaid + transferPaid);
+  const nonCashPaid = roundMoney(cardPaid + transferPaid);
   const cashNeeded = roundMoney(Math.max(0, totals.total - nonCashPaid));
   const change = roundMoney(Math.max(0, cashPaid - cashNeeded));
   const shortage = roundMoney(Math.max(0, totals.total - paid));

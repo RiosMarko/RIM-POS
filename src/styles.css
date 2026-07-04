@@ -3249,6 +3249,12 @@ kbd {
   color: var(--ink);
 }
 
+.cut-detail-actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
 .cut-detail-head h2 {
   margin: 6px 0 4px;
   color: var(--brand-dark);

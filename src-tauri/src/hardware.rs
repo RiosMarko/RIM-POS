@@ -75,6 +75,7 @@ fn command_output(program: &str, args: &[&str], timeout_ms: u64) -> CommandResul
     }
 }
 
+#[cfg(windows)]
 fn powershell_args(command: &str) -> [&str; 6] {
     [
         "-NoProfile",
@@ -87,7 +88,11 @@ fn powershell_args(command: &str) -> [&str; 6] {
 }
 
 fn command_lines(program: &str, args: &[&str]) -> Vec<String> {
-    let Ok(output) = command_output(program, args, 2500) else {
+    command_lines_timeout(program, args, 2500)
+}
+
+fn command_lines_timeout(program: &str, args: &[&str], timeout_ms: u64) -> Vec<String> {
+    let Ok(output) = command_output(program, args, timeout_ms) else {
         return Vec::new();
     };
     if !output.status.success() {
@@ -364,111 +369,113 @@ fn detect_unix_printers(devices: &mut Vec<HardwareDevice>, seen: &mut HashSet<St
     }
 }
 
-fn detect_windows_printers(devices: &mut Vec<HardwareDevice>, seen: &mut HashSet<String>) {
-    let default_command =
-        "(Get-CimInstance Win32_Printer | Where-Object { $_.Default }).Name | Select-Object -First 1";
-    let default_printer = command_lines("powershell", &powershell_args(default_command))
-        .into_iter()
-        .next();
-    let command = "Get-Printer | ForEach-Object { \"$($_.Name)|$($_.DriverName)|$($_.PortName)\" }";
-    for line in command_lines("powershell", &powershell_args(command)) {
+#[cfg(windows)]
+fn detect_windows_hardware(devices: &mut Vec<HardwareDevice>, seen: &mut HashSet<String>) {
+    // Single PowerShell process covers printers, serial ports and driver-less
+    // plugged-in devices. Each separate PS spawn used to cost 300-800ms of cold
+    // start alone, so merging 5 calls into 1 is what actually fixes the freeze.
+    const SCAN_SCRIPT: &str = r#"
+$printers = Get-CimInstance Win32_Printer
+$defaultName = ($printers | Where-Object { $_.Default }).Name | Select-Object -First 1
+foreach ($p in $printers) { "PRINTER|$($p.Name)|$($p.DriverName)|$($p.PortName)|$([bool]($p.Name -eq $defaultName))" }
+Get-CimInstance Win32_SerialPort | ForEach-Object { "SERIAL|$($_.DeviceID)|$($_.Name)|$($_.PNPDeviceID)" }
+Get-CimInstance Win32_PnPEntity | Where-Object { $_.Name -match '\(COM[0-9]+\)' } | ForEach-Object { if ($_.Name -match '(COM[0-9]+)') { "PNPCOM|$($Matches[1])|$($_.Name)|$($_.PNPDeviceID)" } }
+Get-PnpDevice -PresentOnly | Where-Object { $_.Class -in @('Printer','Ports','USB') -and $_.Status -ne 'OK' } | ForEach-Object { "UNCONF|$($_.FriendlyName)|$($_.Class)|$($_.InstanceId)" }
+"#;
+    for line in command_lines_timeout("powershell", &powershell_args(SCAN_SCRIPT), 6000) {
         let parts: Vec<&str> = line.split('|').collect();
-        let name = clean_device_text(parts.first().copied().unwrap_or(""));
-        if name.is_empty() {
+        let Some(tag) = parts.first().copied() else {
             continue;
+        };
+        match tag {
+            "PRINTER" => {
+                let name = clean_device_text(parts.get(1).copied().unwrap_or(""));
+                if name.is_empty() {
+                    continue;
+                }
+                let driver = clean_device_text(parts.get(2).copied().unwrap_or(""));
+                let port = clean_device_text(parts.get(3).copied().unwrap_or(""));
+                let is_default = parts
+                    .get(4)
+                    .map(|value| value.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                add_device(
+                    devices,
+                    seen,
+                    HardwareDevice {
+                        id: name.clone(),
+                        name,
+                        device_type: "printer".into(),
+                        connection: "windows-printer".into(),
+                        detail: format!("{driver} {port}").trim().into(),
+                        is_default,
+                    },
+                );
+            }
+            "SERIAL" => {
+                let id = clean_device_text(parts.get(1).copied().unwrap_or(""));
+                if id.is_empty() {
+                    continue;
+                }
+                let name = clean_device_text(parts.get(2).copied().unwrap_or(&id));
+                add_device(
+                    devices,
+                    seen,
+                    HardwareDevice {
+                        id: id.clone(),
+                        name,
+                        device_type: "serial".into(),
+                        connection: "serial".into(),
+                        detail: clean_device_text(parts.get(3).copied().unwrap_or("Puerto serial local")),
+                        is_default: false,
+                    },
+                );
+            }
+            "PNPCOM" => {
+                let id = clean_device_text(parts.get(1).copied().unwrap_or(""));
+                if id.is_empty() {
+                    continue;
+                }
+                let name = clean_device_text(parts.get(2).copied().unwrap_or(&id));
+                add_device(
+                    devices,
+                    seen,
+                    HardwareDevice {
+                        id: id.clone(),
+                        name,
+                        device_type: "serial".into(),
+                        connection: "windows-pnp-port".into(),
+                        detail: clean_device_text(parts.get(3).copied().unwrap_or("Puerto COM")),
+                        is_default: false,
+                    },
+                );
+            }
+            "UNCONF" => {
+                let name = clean_device_text(parts.get(1).copied().unwrap_or(""));
+                if name.is_empty() {
+                    continue;
+                }
+                let class = clean_device_text(parts.get(2).copied().unwrap_or(""));
+                let instance_id = clean_device_text(parts.get(3).copied().unwrap_or(""));
+                add_device(
+                    devices,
+                    seen,
+                    HardwareDevice {
+                        id: instance_id.clone(),
+                        name,
+                        device_type: "unconfigured".into(),
+                        connection: "windows-driver-missing".into(),
+                        detail: format!("{class} - falta instalar driver ({instance_id})"),
+                        is_default: false,
+                    },
+                );
+            }
+            _ => {}
         }
-        let driver = clean_device_text(parts.get(1).copied().unwrap_or(""));
-        let port = clean_device_text(parts.get(2).copied().unwrap_or(""));
-        add_device(
-            devices,
-            seen,
-            HardwareDevice {
-                id: name.clone(),
-                name: name.clone(),
-                device_type: "printer".into(),
-                connection: "windows-printer".into(),
-                detail: format!("{driver} {port}").trim().into(),
-                is_default: default_printer.as_deref() == Some(name.as_str()),
-            },
-        );
-    }
-
-    let wmi_command = "Get-CimInstance Win32_Printer | ForEach-Object { \"$($_.Name)|$($_.DriverName)|$($_.PortName)|$($_.Default)\" }";
-    for line in command_lines("powershell", &powershell_args(wmi_command)) {
-        let parts: Vec<&str> = line.split('|').collect();
-        let name = clean_device_text(parts.first().copied().unwrap_or(""));
-        if name.is_empty() {
-            continue;
-        }
-        let driver = clean_device_text(parts.get(1).copied().unwrap_or(""));
-        let port = clean_device_text(parts.get(2).copied().unwrap_or(""));
-        let is_default = parts
-            .get(3)
-            .map(|value| value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        add_device(
-            devices,
-            seen,
-            HardwareDevice {
-                id: name.clone(),
-                name,
-                device_type: "printer".into(),
-                connection: "windows-wmi-printer".into(),
-                detail: format!("{driver} {port}").trim().into(),
-                is_default,
-            },
-        );
     }
 }
 
 fn detect_serial_paths(devices: &mut Vec<HardwareDevice>, seen: &mut HashSet<String>) {
-    #[cfg(windows)]
-    {
-        let command = "Get-CimInstance Win32_SerialPort | ForEach-Object { \"$($_.DeviceID)|$($_.Name)|$($_.PNPDeviceID)\" }";
-        for line in command_lines("powershell", &powershell_args(command)) {
-            let parts: Vec<&str> = line.split('|').collect();
-            let id = clean_device_text(parts.first().copied().unwrap_or(""));
-            if id.is_empty() {
-                continue;
-            }
-            let name = clean_device_text(parts.get(1).copied().unwrap_or(&id));
-            add_device(
-                devices,
-                seen,
-                HardwareDevice {
-                    id: id.clone(),
-                    name,
-                    device_type: "serial".into(),
-                    connection: "serial".into(),
-                    detail: clean_device_text(parts.get(2).copied().unwrap_or("Puerto serial local")),
-                    is_default: false,
-                },
-            );
-        }
-
-        let pnp_command = r#"Get-CimInstance Win32_PnPEntity | Where-Object { $_.Name -match '\(COM[0-9]+\)' } | ForEach-Object { if ($_.Name -match '(COM[0-9]+)') { "$($Matches[1])|$($_.Name)|$($_.PNPDeviceID)" } }"#;
-        for line in command_lines("powershell", &powershell_args(pnp_command)) {
-            let parts: Vec<&str> = line.split('|').collect();
-            let id = clean_device_text(parts.first().copied().unwrap_or(""));
-            if id.is_empty() {
-                continue;
-            }
-            let name = clean_device_text(parts.get(1).copied().unwrap_or(&id));
-            add_device(
-                devices,
-                seen,
-                HardwareDevice {
-                    id: id.clone(),
-                    name,
-                    device_type: "serial".into(),
-                    connection: "windows-pnp-port".into(),
-                    detail: clean_device_text(parts.get(2).copied().unwrap_or("Puerto COM")),
-                    is_default: false,
-                },
-            );
-        }
-    }
-
     #[cfg(not(windows))]
     {
         let prefixes = [
@@ -578,11 +585,10 @@ fn detect_raw_printer_paths(devices: &mut Vec<HardwareDevice>, seen: &mut HashSe
 pub fn device_list(include_network: bool) -> Vec<HardwareDevice> {
     let mut devices = Vec::new();
     let mut seen = HashSet::new();
-    if env::consts::OS == "windows" {
-        detect_windows_printers(&mut devices, &mut seen);
-    } else {
-        detect_unix_printers(&mut devices, &mut seen);
-    }
+    #[cfg(windows)]
+    detect_windows_hardware(&mut devices, &mut seen);
+    #[cfg(not(windows))]
+    detect_unix_printers(&mut devices, &mut seen);
     detect_raw_printer_paths(&mut devices, &mut seen);
     detect_serial_paths(&mut devices, &mut seen);
     if include_network {
