@@ -27,6 +27,7 @@ export const userPermissionOptions: Array<{ key: PermissionKey; label: string; d
   { key: "customers", label: "Clientes", description: "Clientes, credito y abonos" },
   { key: "reports", label: "Reportes", description: "Ventas, movimientos y reportes mensuales" },
   { key: "purchases", label: "Compras", description: "Proveedores, entradas y costos" },
+  { key: "view_profit", label: "Ver ganancia", description: "Permite ver margen y utilidad en cortes y reportes" },
 ];
 
 export const allUserPermissions = userPermissionOptions.map((option) => option.key);

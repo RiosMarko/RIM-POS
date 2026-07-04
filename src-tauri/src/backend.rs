@@ -223,24 +223,33 @@ struct SaleReceipt {
     created_at: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 struct ShiftCutSnapshot {
     shift_id: i64,
     cash_session_id: i64,
+    workstation_id: Option<String>,
     status: String,
     opened_at: String,
     closed_at: Option<String>,
+    duration_minutes: i64,
     opened_by_name: Option<String>,
     closed_by_name: Option<String>,
     total_tickets: i64,
     canceled_tickets: i64,
     gross_sales: f64,
     net_sales: f64,
+    gross_profit: f64,
     tax: f64,
     discount: f64,
     cash_paid: f64,
     card_paid: f64,
     transfer_paid: f64,
+    credit_sales: f64,
+    cash_entries_total: f64,
+    cash_out_total: f64,
+    cash_refunds_total: f64,
+    credit_payments_total: f64,
+    counted_income_total: f64,
     average_ticket: f64,
     opening_cash: f64,
     expected_cash: f64,
@@ -248,9 +257,17 @@ struct ShiftCutSnapshot {
     counted_cash: Option<f64>,
     cash_difference: Option<f64>,
     difference_reason: Option<String>,
+    payment_breakdown: Vec<CutPaymentSummary>,
+    departments: Vec<CutDepartmentSummary>,
+    cash_movements: Vec<CutCashMovementSummary>,
+    refunds: Vec<CutRefundSummary>,
+    credit_payments: Vec<CutCreditPaymentSummary>,
+    taxes: Vec<CutTaxSummary>,
+    top_customers_by_sales: Vec<CutCustomerSummary>,
+    top_customers_by_profit: Vec<CutCustomerSummary>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 struct DailyCutSummary {
     date: String,
     cut_count: i64,
@@ -258,16 +275,30 @@ struct DailyCutSummary {
     canceled_tickets: i64,
     gross_sales: f64,
     net_sales: f64,
+    gross_profit: f64,
     tax: f64,
     discount: f64,
     cash_paid: f64,
     card_paid: f64,
     transfer_paid: f64,
+    credit_sales: f64,
+    cash_entries_total: f64,
+    cash_out_total: f64,
+    cash_refunds_total: f64,
+    credit_payments_total: f64,
+    counted_income_total: f64,
     average_ticket: f64,
     opening_cash: f64,
     expected_cash: f64,
     counted_cash: f64,
     cash_difference: f64,
+    payment_breakdown: Vec<CutPaymentSummary>,
+    departments: Vec<CutDepartmentSummary>,
+    refunds: Vec<CutRefundSummary>,
+    credit_payments: Vec<CutCreditPaymentSummary>,
+    taxes: Vec<CutTaxSummary>,
+    top_customers_by_sales: Vec<CutCustomerSummary>,
+    top_customers_by_profit: Vec<CutCustomerSummary>,
     cuts: Vec<ShiftCutSnapshot>,
 }
 
@@ -511,6 +542,7 @@ const USER_PERMISSION_KEYS: &[&str] = &[
     "reports",
     "purchases",
     "invoices",
+    "view_profit",
 ];
 
 #[derive(Debug, Deserialize)]
@@ -528,6 +560,72 @@ struct CustomerCreditInput {
     customer_id: i64,
     amount: f64,
     reason: String,
+    payment_method: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct CutPaymentSummary {
+    method: String,
+    label: String,
+    amount: f64,
+    counts_as_cash: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct CutDepartmentSummary {
+    category: String,
+    quantity: f64,
+    total_sales: f64,
+    gross_profit: f64,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct CutCashMovementSummary {
+    id: i64,
+    movement_type: String,
+    amount: f64,
+    reason: String,
+    actor_name: String,
+    created_at: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct CutRefundSummary {
+    sale_id: i64,
+    folio: String,
+    amount: f64,
+    cash_amount: f64,
+    reason: String,
+    created_at: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct CutCreditPaymentSummary {
+    id: i64,
+    customer_name: String,
+    payment_method: String,
+    amount: f64,
+    reason: String,
+    created_at: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct CutTaxSummary {
+    tax_name: String,
+    tax_type: String,
+    rate: f64,
+    taxable_sales: f64,
+    tax_collected: f64,
+    gross_sales: f64,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct CutCustomerSummary {
+    customer_id: i64,
+    customer_name: String,
+    total_sales: f64,
+    gross_profit: f64,
+    ticket_count: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -1471,6 +1569,25 @@ fn migrate(conn: &Connection) -> CommandResult<()> {
         [],
     );
     let _ = conn.execute("ALTER TABLE sales ADD COLUMN shift_id INTEGER", []);
+    let _ = conn.execute("ALTER TABLE sales ADD COLUMN canceled_at TEXT", []);
+    let _ = conn.execute("ALTER TABLE sales ADD COLUMN canceled_by INTEGER", []);
+    let _ = conn.execute("ALTER TABLE sales ADD COLUMN cancel_reason TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE customer_credit_movements ADD COLUMN movement_kind TEXT NOT NULL DEFAULT 'adjust'",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE customer_credit_movements ADD COLUMN payment_method TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE customer_credit_movements ADD COLUMN actor_id INTEGER",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE customer_credit_movements ADD COLUMN cash_session_id INTEGER",
+        [],
+    );
     let _ = conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_monthly_seq
          ON sales(strftime('%Y-%m', created_at), monthly_seq)
@@ -1494,6 +1611,8 @@ fn migrate(conn: &Connection) -> CommandResult<()> {
 
         CREATE INDEX IF NOT EXISTS idx_customer_credit_movements_customer_created
           ON customer_credit_movements(customer_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_customer_credit_movements_session_created
+          ON customer_credit_movements(cash_session_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_cash_sessions_status_id ON cash_sessions(status, id);
         CREATE INDEX IF NOT EXISTS idx_cash_sessions_workstation_status ON cash_sessions(workstation_id, status);
         CREATE INDEX IF NOT EXISTS idx_cash_sessions_opened_at ON cash_sessions(opened_at);
@@ -3168,15 +3287,39 @@ fn customer_credit_adjust(
     let conn = state.db.lock().map_err(|error| error.to_string())?;
     require_permission(&conn, actor_id, "customers")?;
     let now = Utc::now().to_rfc3339();
+    let movement_kind = if input.amount < 0.0 { "payment" } else { "charge" };
+    let payment_method = input
+        .payment_method
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase());
+    let cash_session_id = if movement_kind == "payment" {
+        let workstation_id = current_workstation_id(&conn)?;
+        get_open_shift(&conn, &workstation_id)?
+            .map(|(_, session_id)| session_id)
+    } else {
+        None
+    };
     conn.execute(
         "UPDATE customers SET balance = balance + ?1 WHERE id = ?2",
         params![input.amount, input.customer_id],
     )
     .map_err(|error| error.to_string())?;
     conn.execute(
-        "INSERT INTO customer_credit_movements (customer_id, amount, reason, created_at)
-         VALUES (?1, ?2, ?3, ?4)",
-        params![input.customer_id, input.amount, input.reason.trim(), now],
+        "INSERT INTO customer_credit_movements
+         (customer_id, amount, reason, created_at, movement_kind, payment_method, actor_id, cash_session_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            input.customer_id,
+            input.amount,
+            input.reason.trim(),
+            now,
+            movement_kind,
+            payment_method,
+            actor_id,
+            cash_session_id
+        ],
     )
     .map_err(|error| error.to_string())?;
     conn.query_row(
@@ -4154,8 +4297,20 @@ fn cancel_sale_with_conn(
         }
     }
     tx.execute(
-        "UPDATE sales SET status = 'canceled', notes = COALESCE(notes, '') || ?1 WHERE id = ?2",
-        params![format!(" | Cancelada: {}", reason.trim()), sale_id],
+        "UPDATE sales
+         SET status = 'canceled',
+             notes = COALESCE(notes, '') || ?1,
+             canceled_at = ?2,
+             canceled_by = ?3,
+             cancel_reason = ?4
+         WHERE id = ?5",
+        params![
+            format!(" | Cancelada: {}", reason.trim()),
+            now,
+            actor_id,
+            reason.trim(),
+            sale_id
+        ],
     )
     .map_err(|error| error.to_string())?;
     if let Some(session_id) = cash_session_id {
@@ -4751,13 +4906,23 @@ fn shift_cut_text(conn: &Connection, shift_id: i64) -> CommandResult<String> {
     if let Some(closed_at) = &snapshot.closed_at {
         text.push_str(&format!("Cierre: {closed_at}\n"));
     }
+    if let Some(workstation_id) = &snapshot.workstation_id {
+        text.push_str(&format!("Caja: {workstation_id}\n"));
+    }
+    text.push_str(&format!("Duracion: {} min\n", snapshot.duration_minutes));
     text.push_str(&format!("Tickets: {}\n", snapshot.total_tickets));
     text.push_str(&format!("Cancelados: {}\n", snapshot.canceled_tickets));
     text.push_str(&format!("Ventas netas: ${:.2}\n", snapshot.net_sales));
+    text.push_str(&format!("Ganancia: ${:.2}\n", snapshot.gross_profit));
     text.push_str(&format!("Efectivo: ${:.2}\n", snapshot.cash_paid));
     text.push_str(&format!("Tarjeta: ${:.2}\n", snapshot.card_paid));
-    text.push_str(&format!("Credito: ${:.2}\n", snapshot.transfer_paid));
+    text.push_str(&format!("Transfer: ${:.2}\n", snapshot.transfer_paid));
+    text.push_str(&format!("Ventas cred: ${:.2}\n", snapshot.credit_sales));
     text.push_str(&format!("Fondo inicial: ${:.2}\n", snapshot.opening_cash));
+    text.push_str(&format!("Entradas: ${:.2}\n", snapshot.cash_entries_total));
+    text.push_str(&format!("Salidas: ${:.2}\n", snapshot.cash_out_total));
+    text.push_str(&format!("Dev cash: ${:.2}\n", snapshot.cash_refunds_total));
+    text.push_str(&format!("Abonos cred: ${:.2}\n", snapshot.credit_payments_total));
     text.push_str(&format!("Esperado: ${:.2}\n", snapshot.expected_cash));
     if let Some(counted) = snapshot.counted_cash.or(snapshot.closing_cash) {
         text.push_str(&format!("Contado: ${counted:.2}\n"));
@@ -4765,6 +4930,15 @@ fn shift_cut_text(conn: &Connection, shift_id: i64) -> CommandResult<String> {
             "Diferencia: ${:.2}\n",
             counted - snapshot.expected_cash
         ));
+    }
+    if !snapshot.departments.is_empty() {
+        text.push_str(&format!("{separator}\nDEPTO\n"));
+        for department in snapshot.departments.iter().take(6) {
+            text.push_str(&format!(
+                "{} ${:.2}\n",
+                department.category, department.total_sales
+            ));
+        }
     }
     text.push_str(&format!("{separator}\n"));
     Ok(text)
@@ -4805,11 +4979,18 @@ fn daily_cut_summary_with_conn(
         canceled_tickets: cuts.iter().map(|cut| cut.canceled_tickets).sum(),
         gross_sales: round_money(cuts.iter().map(|cut| cut.gross_sales).sum()),
         net_sales: round_money(net_sales),
+        gross_profit: round_money(cuts.iter().map(|cut| cut.gross_profit).sum()),
         tax: round_money(cuts.iter().map(|cut| cut.tax).sum()),
         discount: round_money(cuts.iter().map(|cut| cut.discount).sum()),
         cash_paid: round_money(cuts.iter().map(|cut| cut.cash_paid).sum()),
         card_paid: round_money(cuts.iter().map(|cut| cut.card_paid).sum()),
         transfer_paid: round_money(cuts.iter().map(|cut| cut.transfer_paid).sum()),
+        credit_sales: round_money(cuts.iter().map(|cut| cut.credit_sales).sum()),
+        cash_entries_total: round_money(cuts.iter().map(|cut| cut.cash_entries_total).sum()),
+        cash_out_total: round_money(cuts.iter().map(|cut| cut.cash_out_total).sum()),
+        cash_refunds_total: round_money(cuts.iter().map(|cut| cut.cash_refunds_total).sum()),
+        credit_payments_total: round_money(cuts.iter().map(|cut| cut.credit_payments_total).sum()),
+        counted_income_total: round_money(cuts.iter().map(|cut| cut.counted_income_total).sum()),
         average_ticket: average_ticket(net_sales, total_tickets),
         opening_cash: round_money(cuts.iter().map(|cut| cut.opening_cash).sum()),
         expected_cash: round_money(cuts.iter().map(|cut| cut.expected_cash).sum()),
@@ -4823,6 +5004,16 @@ fn daily_cut_summary_with_conn(
                 .map(|cut| cut.cash_difference.unwrap_or(0.0))
                 .sum(),
         ),
+        payment_breakdown: merge_payment_breakdowns(&cuts),
+        departments: merge_department_summaries(&cuts),
+        refunds: cuts.iter().flat_map(|cut| cut.refunds.clone()).collect(),
+        credit_payments: cuts
+            .iter()
+            .flat_map(|cut| cut.credit_payments.clone())
+            .collect(),
+        taxes: merge_tax_summaries(&cuts),
+        top_customers_by_sales: merge_customer_summaries(&cuts, |cut| &cut.top_customers_by_sales),
+        top_customers_by_profit: merge_customer_summaries(&cuts, |cut| &cut.top_customers_by_profit),
         cuts,
     })
 }
@@ -4852,9 +5043,15 @@ fn daily_cut_text(conn: &Connection, date: Option<String>) -> CommandResult<Stri
     text.push_str(&format!("Tickets: {}\n", summary.total_tickets));
     text.push_str(&format!("Cancelados: {}\n", summary.canceled_tickets));
     text.push_str(&format!("Ventas netas: ${:.2}\n", summary.net_sales));
+    text.push_str(&format!("Ganancia: ${:.2}\n", summary.gross_profit));
     text.push_str(&format!("Efectivo: ${:.2}\n", summary.cash_paid));
     text.push_str(&format!("Tarjeta: ${:.2}\n", summary.card_paid));
-    text.push_str(&format!("Credito: ${:.2}\n", summary.transfer_paid));
+    text.push_str(&format!("Transfer: ${:.2}\n", summary.transfer_paid));
+    text.push_str(&format!("Ventas cred: ${:.2}\n", summary.credit_sales));
+    text.push_str(&format!("Entradas: ${:.2}\n", summary.cash_entries_total));
+    text.push_str(&format!("Salidas: ${:.2}\n", summary.cash_out_total));
+    text.push_str(&format!("Dev cash: ${:.2}\n", summary.cash_refunds_total));
+    text.push_str(&format!("Abonos cred: ${:.2}\n", summary.credit_payments_total));
     text.push_str(&format!("Esperado: ${:.2}\n", summary.expected_cash));
     text.push_str(&format!("Contado: ${:.2}\n", summary.counted_cash));
     text.push_str(&format!(
@@ -5023,9 +5220,134 @@ fn get_open_shift(conn: &Connection, workstation_id: &str) -> CommandResult<Opti
     .map_err(|error| error.to_string())
 }
 
+fn payment_method_counts_as_cash(method: &str) -> bool {
+    method.eq_ignore_ascii_case("cash")
+}
+
+fn payment_method_label(method: &str) -> String {
+    match method {
+        "cash" => "Efectivo",
+        "card" => "Tarjeta",
+        "transfer" => "Transferencia",
+        "credit" => "Credito",
+        "voucher" => "Vale",
+        other => other,
+    }
+    .to_string()
+}
+
+fn duration_minutes_between(opened_at: &str, closed_at: Option<&str>) -> i64 {
+    let opened = chrono::DateTime::parse_from_rfc3339(opened_at).ok();
+    let closed = closed_at
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .or_else(|| chrono::DateTime::parse_from_rfc3339(&now_iso()).ok());
+    match (opened, closed) {
+        (Some(start), Some(end)) => ((end - start).num_minutes()).max(0),
+        _ => 0,
+    }
+}
+
+fn merge_payment_breakdowns(cuts: &[ShiftCutSnapshot]) -> Vec<CutPaymentSummary> {
+    let mut totals: HashMap<String, CutPaymentSummary> = HashMap::new();
+    for cut in cuts {
+        for payment in &cut.payment_breakdown {
+            let entry = totals
+                .entry(payment.method.clone())
+                .or_insert_with(|| CutPaymentSummary {
+                    method: payment.method.clone(),
+                    label: payment.label.clone(),
+                    amount: 0.0,
+                    counts_as_cash: payment.counts_as_cash,
+                });
+            entry.amount = round_money(entry.amount + payment.amount);
+        }
+    }
+    let mut result = totals.into_values().collect::<Vec<_>>();
+    result.sort_by(|left, right| right.amount.total_cmp(&left.amount));
+    result
+}
+
+fn merge_department_summaries(cuts: &[ShiftCutSnapshot]) -> Vec<CutDepartmentSummary> {
+    let mut totals: HashMap<String, CutDepartmentSummary> = HashMap::new();
+    for cut in cuts {
+        for department in &cut.departments {
+            let entry = totals
+                .entry(department.category.clone())
+                .or_insert_with(|| CutDepartmentSummary {
+                    category: department.category.clone(),
+                    quantity: 0.0,
+                    total_sales: 0.0,
+                    gross_profit: 0.0,
+                });
+            entry.quantity = round_money(entry.quantity + department.quantity);
+            entry.total_sales = round_money(entry.total_sales + department.total_sales);
+            entry.gross_profit = round_money(entry.gross_profit + department.gross_profit);
+        }
+    }
+    let mut result = totals.into_values().collect::<Vec<_>>();
+    result.sort_by(|left, right| right.total_sales.total_cmp(&left.total_sales));
+    result
+}
+
+fn merge_tax_summaries(cuts: &[ShiftCutSnapshot]) -> Vec<CutTaxSummary> {
+    let mut totals: HashMap<String, CutTaxSummary> = HashMap::new();
+    for cut in cuts {
+        for tax in &cut.taxes {
+            let key = format!("{}|{}|{:.6}", tax.tax_name, tax.tax_type, tax.rate);
+            let entry = totals.entry(key).or_insert_with(|| CutTaxSummary {
+                tax_name: tax.tax_name.clone(),
+                tax_type: tax.tax_type.clone(),
+                rate: tax.rate,
+                taxable_sales: 0.0,
+                tax_collected: 0.0,
+                gross_sales: 0.0,
+            });
+            entry.taxable_sales = round_money(entry.taxable_sales + tax.taxable_sales);
+            entry.tax_collected = round_money(entry.tax_collected + tax.tax_collected);
+            entry.gross_sales = round_money(entry.gross_sales + tax.gross_sales);
+        }
+    }
+    let mut result = totals.into_values().collect::<Vec<_>>();
+    result.sort_by(|left, right| right.tax_collected.total_cmp(&left.tax_collected));
+    result
+}
+
+fn merge_customer_summaries(
+    cuts: &[ShiftCutSnapshot],
+    selector: fn(&ShiftCutSnapshot) -> &Vec<CutCustomerSummary>,
+) -> Vec<CutCustomerSummary> {
+    let mut totals: HashMap<i64, CutCustomerSummary> = HashMap::new();
+    for cut in cuts {
+        for customer in selector(cut) {
+            let entry = totals
+                .entry(customer.customer_id)
+                .or_insert_with(|| CutCustomerSummary {
+                    customer_id: customer.customer_id,
+                    customer_name: customer.customer_name.clone(),
+                    total_sales: 0.0,
+                    gross_profit: 0.0,
+                    ticket_count: 0,
+                });
+            entry.total_sales = round_money(entry.total_sales + customer.total_sales);
+            entry.gross_profit = round_money(entry.gross_profit + customer.gross_profit);
+            entry.ticket_count += customer.ticket_count;
+        }
+    }
+    let mut result = totals.into_values().collect::<Vec<_>>();
+    result.sort_by(|left, right| {
+        right
+            .total_sales
+            .total_cmp(&left.total_sales)
+            .then(right.gross_profit.total_cmp(&left.gross_profit))
+    });
+    result.truncate(5);
+    result
+}
+
 fn calculate_shift_cut(conn: &Connection, shift_id: i64) -> CommandResult<ShiftCutSnapshot> {
     let (
         cash_session_id,
+        workstation_id,
         status,
         opened_at,
         closed_at,
@@ -5033,9 +5355,9 @@ fn calculate_shift_cut(conn: &Connection, shift_id: i64) -> CommandResult<ShiftC
         closed_by_name,
         opening_cash,
         closing_cash,
-        expected_cash,
     ): (
         i64,
+        Option<String>,
         String,
         String,
         Option<String>,
@@ -5043,12 +5365,12 @@ fn calculate_shift_cut(conn: &Connection, shift_id: i64) -> CommandResult<ShiftC
         Option<String>,
         f64,
         Option<f64>,
-        f64,
     ) = conn
         .query_row(
-            "SELECT sh.cash_session_id, sh.status, sh.opened_at, sh.closed_at, opener.name, closer.name,
-                    sh.opening_cash, sh.closing_cash, sh.expected_cash
+            "SELECT sh.cash_session_id, cs.workstation_id, sh.status, sh.opened_at, sh.closed_at, opener.name, closer.name,
+                    sh.opening_cash, sh.closing_cash
              FROM shifts sh
+             JOIN cash_sessions cs ON cs.id = sh.cash_session_id
              LEFT JOIN users opener ON opener.id = sh.opened_by
              LEFT JOIN users closer ON closer.id = sh.closed_by
              WHERE sh.id = ?1",
@@ -5068,6 +5390,9 @@ fn calculate_shift_cut(conn: &Connection, shift_id: i64) -> CommandResult<ShiftC
             },
         )
         .map_err(|_| "Turno no encontrado".to_string())?;
+
+    let duration_minutes = duration_minutes_between(&opened_at, closed_at.as_deref());
+    let prices_include_tax = setting_bool(conn, "tax_prices_include_tax", true)?;
 
     let (total_tickets, canceled_tickets, net_sales, tax, discount): (i64, i64, f64, f64, f64) =
         conn.query_row(
@@ -5092,19 +5417,26 @@ fn calculate_shift_cut(conn: &Connection, shift_id: i64) -> CommandResult<ShiftC
         )
         .map_err(|error| error.to_string())?;
 
-    let (cash_received, card_paid, transfer_paid): (f64, f64, f64) = conn
-        .query_row(
-            "SELECT
-                COALESCE(SUM(CASE WHEN p.method = 'cash' THEN p.amount ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN p.method = 'card' THEN p.amount ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN p.method = 'transfer' THEN p.amount ELSE 0 END), 0)
+    let mut payment_totals = HashMap::<String, f64>::new();
+    let mut payment_stmt = conn
+        .prepare(
+            "SELECT p.method, COALESCE(SUM(p.amount), 0)
              FROM payments p
              JOIN sales s ON s.id = p.sale_id
-             WHERE s.shift_id = ?1 AND s.status = 'paid'",
-            params![shift_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+             WHERE s.shift_id = ?1 AND s.status = 'paid'
+             GROUP BY p.method",
         )
         .map_err(|error| error.to_string())?;
+    let payment_rows = payment_stmt
+        .query_map(params![shift_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+        })
+        .map_err(|error| error.to_string())?;
+    for row in payment_rows {
+        let (method, amount) = row.map_err(|error| error.to_string())?;
+        payment_totals.insert(method, round_money(amount));
+    }
+
     let cash_change = conn
         .query_row(
             "SELECT COALESCE(SUM(s.change_due), 0)
@@ -5116,32 +5448,345 @@ fn calculate_shift_cut(conn: &Connection, shift_id: i64) -> CommandResult<ShiftC
             |row| row.get::<_, f64>(0),
         )
         .map_err(|error| error.to_string())?;
-    let cash_paid = round_money((cash_received - cash_change).max(0.0));
+
+    let raw_cash_paid = payment_totals.get("cash").copied().unwrap_or(0.0);
+    let cash_paid = round_money((raw_cash_paid - cash_change).max(0.0));
+    let card_paid = round_money(payment_totals.get("card").copied().unwrap_or(0.0));
+    let transfer_paid = round_money(payment_totals.get("transfer").copied().unwrap_or(0.0));
+    let credit_sales = round_money(payment_totals.get("credit").copied().unwrap_or(0.0));
+
+    let mut payment_breakdown = payment_totals
+        .into_iter()
+        .map(|(method, amount)| CutPaymentSummary {
+            amount: if method == "cash" { cash_paid } else { amount },
+            label: payment_method_label(&method),
+            counts_as_cash: payment_method_counts_as_cash(&method),
+            method,
+        })
+        .collect::<Vec<_>>();
+    payment_breakdown.sort_by(|left, right| right.amount.total_cmp(&left.amount));
+
+    let mut cash_movement_stmt = conn
+        .prepare(
+            "SELECT m.id, m.movement_type, m.amount, m.reason, u.name, m.created_at
+             FROM cash_movements m
+             JOIN users u ON u.id = m.actor_id
+             WHERE m.session_id = ?1
+             ORDER BY m.created_at ASC, m.id ASC",
+        )
+        .map_err(|error| error.to_string())?;
+    let cash_movement_rows = cash_movement_stmt
+        .query_map(params![cash_session_id], |row| {
+            Ok(CutCashMovementSummary {
+                id: row.get(0)?,
+                movement_type: row.get(1)?,
+                amount: row.get(2)?,
+                reason: row.get(3)?,
+                actor_name: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    let cash_movements = cash_movement_rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let cash_entries_total = round_money(
+        cash_movements
+            .iter()
+            .filter(|movement| movement.movement_type == "in")
+            .map(|movement| movement.amount)
+            .sum(),
+    );
+    let cash_out_total = round_money(
+        cash_movements
+            .iter()
+            .filter(|movement| movement.movement_type == "out")
+            .map(|movement| movement.amount)
+            .sum(),
+    );
+
+    let mut refund_stmt = conn
+        .prepare(
+            "SELECT s.id, s.folio, s.total, s.change_due,
+                    COALESCE((SELECT SUM(amount) FROM payments WHERE sale_id = s.id AND method = 'cash'), 0),
+                    COALESCE(s.cancel_reason, s.notes, 'Cancelacion'),
+                    COALESCE(s.canceled_at, s.created_at)
+             FROM sales s
+             WHERE s.shift_id = ?1 AND s.status = 'canceled'
+             ORDER BY COALESCE(s.canceled_at, s.created_at) DESC, s.id DESC",
+        )
+        .map_err(|error| error.to_string())?;
+    let refund_rows = refund_stmt
+        .query_map(params![shift_id], |row| {
+            let cash_amount = (row.get::<_, f64>(4)? - row.get::<_, f64>(3)?).max(0.0);
+            Ok(CutRefundSummary {
+                sale_id: row.get(0)?,
+                folio: row.get(1)?,
+                amount: row.get(2)?,
+                cash_amount: round_money(cash_amount),
+                reason: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    let refunds = refund_rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let cash_refunds_total = round_money(refunds.iter().map(|refund| refund.cash_amount).sum());
+
+    let mut credit_payment_stmt = conn
+        .prepare(
+            "SELECT m.id, c.name, COALESCE(m.payment_method, 'cash'), ABS(m.amount), m.reason, m.created_at
+             FROM customer_credit_movements m
+             JOIN customers c ON c.id = m.customer_id
+             WHERE m.cash_session_id = ?1 AND m.movement_kind = 'payment'
+             ORDER BY m.created_at DESC, m.id DESC",
+        )
+        .map_err(|error| error.to_string())?;
+    let credit_payment_rows = credit_payment_stmt
+        .query_map(params![cash_session_id], |row| {
+            Ok(CutCreditPaymentSummary {
+                id: row.get(0)?,
+                customer_name: row.get(1)?,
+                payment_method: row.get(2)?,
+                amount: row.get(3)?,
+                reason: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    let credit_payments = credit_payment_rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let credit_payments_total = round_money(
+        credit_payments
+            .iter()
+            .filter(|payment| payment_method_counts_as_cash(&payment.payment_method))
+            .map(|payment| payment.amount)
+            .sum(),
+    );
+
+    let mut department_stmt = conn
+        .prepare(
+            "SELECT COALESCE(p.category, '- Sin Departamento -'),
+                    COALESCE(SUM(si.quantity), 0),
+                    COALESCE(SUM(si.line_total), 0),
+                    COALESCE(SUM(si.line_total - (p.cost * si.quantity)), 0)
+             FROM sale_items si
+             JOIN sales s ON s.id = si.sale_id
+             JOIN products p ON p.id = si.product_id
+             WHERE s.shift_id = ?1 AND s.status = 'paid'
+             GROUP BY COALESCE(p.category, '- Sin Departamento -')
+             ORDER BY SUM(si.line_total) DESC",
+        )
+        .map_err(|error| error.to_string())?;
+    let department_rows = department_stmt
+        .query_map(params![shift_id], |row| {
+            Ok(CutDepartmentSummary {
+                category: row.get(0)?,
+                quantity: round_money(row.get(1)?),
+                total_sales: round_money(row.get(2)?),
+                gross_profit: round_money(row.get(3)?),
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    let departments = department_rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let gross_profit = round_money(departments.iter().map(|department| department.gross_profit).sum());
+
+    let mut customer_stmt = conn
+        .prepare(
+            "SELECT s.id, c.id, c.name, s.total,
+                    COALESCE((
+                      SELECT SUM(si.line_total - (p.cost * si.quantity))
+                      FROM sale_items si
+                      JOIN products p ON p.id = si.product_id
+                      WHERE si.sale_id = s.id
+                    ), 0)
+             FROM sales s
+             JOIN customers c ON c.id = s.customer_id
+             WHERE s.shift_id = ?1 AND s.status = 'paid' AND s.customer_id IS NOT NULL",
+        )
+        .map_err(|error| error.to_string())?;
+    let customer_rows = customer_stmt
+        .query_map(params![shift_id], |row| {
+            Ok((
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, f64>(3)?,
+                row.get::<_, f64>(4)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    let mut customer_totals: HashMap<i64, CutCustomerSummary> = HashMap::new();
+    for row in customer_rows {
+        let (customer_id, customer_name, total_sale, sale_profit) =
+            row.map_err(|error| error.to_string())?;
+        let entry = customer_totals
+            .entry(customer_id)
+            .or_insert(CutCustomerSummary {
+                customer_id,
+                customer_name,
+                total_sales: 0.0,
+                gross_profit: 0.0,
+                ticket_count: 0,
+            });
+        entry.total_sales = round_money(entry.total_sales + total_sale);
+        entry.gross_profit = round_money(entry.gross_profit + sale_profit);
+        entry.ticket_count += 1;
+    }
+    let mut top_customers_by_sales = customer_totals.values().cloned().collect::<Vec<_>>();
+    top_customers_by_sales.sort_by(|left, right| right.total_sales.total_cmp(&left.total_sales));
+    top_customers_by_sales.truncate(5);
+    let mut top_customers_by_profit = customer_totals.values().cloned().collect::<Vec<_>>();
+    top_customers_by_profit
+        .sort_by(|left, right| right.gross_profit.total_cmp(&left.gross_profit));
+    top_customers_by_profit.truncate(5);
+
+    let mut taxes = Vec::new();
+    let mut tax_totals: HashMap<String, CutTaxSummary> = HashMap::new();
+    let mut sale_item_stmt = conn
+        .prepare(
+            "SELECT si.product_id, si.quantity, si.unit_price, si.discount, si.tax_rate
+             FROM sale_items si
+             JOIN sales s ON s.id = si.sale_id
+             WHERE s.shift_id = ?1 AND s.status = 'paid'",
+        )
+        .map_err(|error| error.to_string())?;
+    let sale_item_rows = sale_item_stmt
+        .query_map(params![shift_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, f64>(3)?,
+                row.get::<_, f64>(4)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    for row in sale_item_rows {
+        let (product_id, quantity, unit_price, discount, fallback_rate) =
+            row.map_err(|error| error.to_string())?;
+        let mut tax_components = Vec::<(String, String, f64)>::new();
+        let mut product_tax_stmt = conn
+            .prepare(
+                "SELECT t.name, t.type, t.rate
+                 FROM product_taxes pt
+                 JOIN taxes t ON t.id = pt.tax_id
+                 WHERE pt.product_id = ?1 AND t.is_active = 1
+                 ORDER BY t.id",
+            )
+            .map_err(|error| error.to_string())?;
+        let product_tax_rows = product_tax_stmt
+            .query_map(params![product_id], |tax_row| {
+                Ok((
+                    tax_row.get::<_, String>(0)?,
+                    tax_row.get::<_, String>(1)?,
+                    tax_row.get::<_, f64>(2)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+        for tax_row in product_tax_rows {
+            tax_components.push(tax_row.map_err(|error| error.to_string())?);
+        }
+        let effective_rate = if tax_components.is_empty() {
+            fallback_rate
+        } else {
+            tax_components.iter().map(|(_, _, rate)| rate).sum()
+        };
+        if effective_rate <= 0.0 {
+            continue;
+        }
+        let line_base = quantity * unit_price;
+        let (line_subtotal, line_tax, _) =
+            line_amounts(line_base, discount, effective_rate, prices_include_tax, true);
+        if tax_components.is_empty() {
+            let key = format!("fallback|{effective_rate:.6}");
+            let entry = tax_totals.entry(key).or_insert(CutTaxSummary {
+                tax_name: format!("Impuesto {:.2}%", effective_rate * 100.0),
+                tax_type: "MIXTO".into(),
+                rate: effective_rate,
+                taxable_sales: 0.0,
+                tax_collected: 0.0,
+                gross_sales: 0.0,
+            });
+            entry.taxable_sales = round_money(entry.taxable_sales + line_subtotal);
+            entry.tax_collected = round_money(entry.tax_collected + line_tax);
+            entry.gross_sales = round_money(entry.gross_sales + line_subtotal + line_tax);
+            continue;
+        }
+        for (name, tax_type, rate) in tax_components {
+            let ratio = if effective_rate > 0.0 { rate / effective_rate } else { 0.0 };
+            let allocated_tax = round_money(line_tax * ratio);
+            let key = format!("{name}|{tax_type}|{rate:.6}");
+            let entry = tax_totals.entry(key).or_insert(CutTaxSummary {
+                tax_name: name,
+                tax_type,
+                rate,
+                taxable_sales: 0.0,
+                tax_collected: 0.0,
+                gross_sales: 0.0,
+            });
+            entry.taxable_sales = round_money(entry.taxable_sales + line_subtotal);
+            entry.tax_collected = round_money(entry.tax_collected + allocated_tax);
+            entry.gross_sales = round_money(entry.gross_sales + line_subtotal + allocated_tax);
+        }
+    }
+    taxes.extend(tax_totals.into_values());
+    taxes.sort_by(|left, right| right.tax_collected.total_cmp(&left.tax_collected));
+
+    let expected_cash = round_money(
+        opening_cash + cash_paid + cash_entries_total - cash_out_total - cash_refunds_total
+            + credit_payments_total,
+    );
+    let counted_income_total = round_money(
+        cash_paid + cash_entries_total - cash_out_total - cash_refunds_total + credit_payments_total,
+    );
     let net_sales = round_money(net_sales);
+    let closing_cash = closing_cash.map(round_money);
+
     Ok(ShiftCutSnapshot {
         shift_id,
         cash_session_id,
+        workstation_id,
         status,
         opened_at,
         closed_at,
+        duration_minutes,
         opened_by_name,
         closed_by_name,
         total_tickets,
         canceled_tickets,
         gross_sales: round_money(net_sales + discount),
         net_sales,
+        gross_profit,
         tax: round_money(tax),
         discount: round_money(discount),
         cash_paid,
-        card_paid: round_money(card_paid),
-        transfer_paid: round_money(transfer_paid),
+        card_paid,
+        transfer_paid,
+        credit_sales,
+        cash_entries_total,
+        cash_out_total,
+        cash_refunds_total,
+        credit_payments_total,
+        counted_income_total,
         average_ticket: average_ticket(net_sales, total_tickets),
         opening_cash: round_money(opening_cash),
-        expected_cash: round_money(expected_cash),
-        closing_cash: closing_cash.map(round_money),
-        counted_cash: closing_cash.map(round_money),
+        expected_cash,
+        closing_cash,
+        counted_cash: closing_cash,
         cash_difference: closing_cash.map(|value| round_money(value - expected_cash)),
         difference_reason: None,
+        payment_breakdown,
+        departments,
+        cash_movements,
+        refunds,
+        credit_payments,
+        taxes,
+        top_customers_by_sales,
+        top_customers_by_profit,
     })
 }
 
@@ -5958,6 +6603,35 @@ fn settings_get(
 }
 
 #[tauri::command]
+fn settings_get_many(
+    state: State<'_, AppState>,
+    actor_id: i64,
+    keys: Vec<String>,
+) -> CommandResult<HashMap<String, Option<String>>> {
+    let conn = state.db.lock().map_err(|error| error.to_string())?;
+    let mut values = HashMap::with_capacity(keys.len());
+    for key in keys {
+        if is_public_setting_key(&key) {
+            require_active_user(&conn, actor_id)?;
+        } else if is_invoice_setting_key(&key) {
+            require_permission(&conn, actor_id, "invoices")?;
+        } else {
+            require_admin(&conn, actor_id)?;
+        }
+        let value = conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        values.insert(key, value);
+    }
+    Ok(values)
+}
+
+#[tauri::command]
 fn settings_set(
     state: State<'_, AppState>,
     actor_id: i64,
@@ -5977,6 +6651,31 @@ fn settings_set(
         params![key, value, now_iso()],
     )
     .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn settings_set_many(
+    state: State<'_, AppState>,
+    actor_id: i64,
+    entries: HashMap<String, String>,
+) -> CommandResult<()> {
+    let conn = state.db.lock().map_err(|error| error.to_string())?;
+    let updated_at = now_iso();
+    for (key, value) in entries {
+        if is_invoice_setting_key(&key) {
+            require_permission(&conn, actor_id, "invoices")?;
+        } else {
+            require_admin(&conn, actor_id)?;
+        }
+        conn.execute(
+            "INSERT INTO app_settings (key, value, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params![key, value, updated_at],
+        )
+        .map_err(|error| error.to_string())?;
+    }
     Ok(())
 }
 
@@ -6548,13 +7247,205 @@ mod tests {
         .unwrap();
         assert_eq!(second.total, 20.0);
         let snapshot =
-            close_shift_cut_z_with_conn(&mut conn, shift_id, 120.0, 2, Some("[]".into()), None)
+            close_shift_cut_z_with_conn(&mut conn, shift_id, 80.0, 2, Some("[]".into()), None)
                 .unwrap();
         assert_eq!(snapshot.status, "closed");
         assert_eq!(snapshot.total_tickets, 1);
         assert_eq!(snapshot.canceled_tickets, 1);
-        assert_eq!(snapshot.expected_cash, 120.0);
+        assert_eq!(snapshot.expected_cash, 80.0);
         assert_eq!(snapshot.cash_difference, Some(0.0));
+    }
+
+    #[test]
+    fn shift_cut_expected_cash_uses_sales_movements_refunds_and_credit_payments() {
+        let mut conn = flow_conn();
+        conn.execute(
+            "INSERT INTO customers (id, name, rfc, phone, email, credit_limit, balance, created_at)
+             VALUES (1, 'Cliente Uno', NULL, NULL, NULL, 500, 0, ?1)",
+            params![now_iso()],
+        )
+        .unwrap();
+        let session = open_cash_session_with_conn(&conn, 2, 100.0).unwrap();
+        let shift_id: i64 = conn
+            .query_row(
+                "SELECT id FROM shifts WHERE cash_session_id = ?1",
+                params![session.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        create_sale_with_conn(
+            &mut conn,
+            SaleDraft {
+                cashier_id: 2,
+                customer_id: Some(1),
+                items: vec![SaleItemInput {
+                    product_id: 1,
+                    quantity: 2.0,
+                    unit_price: 20.0,
+                    discount: 0.0,
+                }],
+                payments: vec![PaymentInput {
+                    method: "cash".into(),
+                    amount: 40.0,
+                    reference: None,
+                }],
+                notes: None,
+            },
+        )
+        .unwrap();
+
+        let sale_to_cancel = create_sale_with_conn(
+            &mut conn,
+            SaleDraft {
+                cashier_id: 2,
+                customer_id: Some(1),
+                items: vec![SaleItemInput {
+                    product_id: 1,
+                    quantity: 1.0,
+                    unit_price: 20.0,
+                    discount: 0.0,
+                }],
+                payments: vec![PaymentInput {
+                    method: "cash".into(),
+                    amount: 20.0,
+                    reference: None,
+                }],
+                notes: None,
+            },
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO cash_movements (session_id, movement_type, amount, reason, actor_id, created_at)
+             VALUES (?1, 'in', 10, 'Recarga de caja', 2, ?2)",
+            params![session.id, now_iso()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cash_movements (session_id, movement_type, amount, reason, actor_id, created_at)
+             VALUES (?1, 'out', 5, 'Compra menor', 2, ?2)",
+            params![session.id, now_iso()],
+        )
+        .unwrap();
+
+        conn.execute(
+            "UPDATE customers SET balance = balance + 30 WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO customer_credit_movements
+             (customer_id, amount, reason, created_at, movement_kind, payment_method, actor_id, cash_session_id)
+             VALUES (1, 30, 'Cargo', ?1, 'charge', NULL, 1, NULL)",
+            params![now_iso()],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE customers SET balance = balance - 15 WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO customer_credit_movements
+             (customer_id, amount, reason, created_at, movement_kind, payment_method, actor_id, cash_session_id)
+             VALUES (1, -15, 'Abono parcial', ?1, 'payment', 'cash', 1, ?2)",
+            params![now_iso(), session.id],
+        )
+        .unwrap();
+
+        cancel_sale_with_conn(&mut conn, sale_to_cancel.sale_id, 1, "Devolucion".into()).unwrap();
+        let snapshot = calculate_shift_cut(&conn, shift_id).unwrap();
+        assert_eq!(snapshot.total_tickets, 1);
+        assert_eq!(snapshot.canceled_tickets, 1);
+        assert_eq!(snapshot.cash_paid, 40.0);
+        assert_eq!(snapshot.cash_entries_total, 10.0);
+        assert_eq!(snapshot.cash_out_total, 5.0);
+        assert_eq!(snapshot.cash_refunds_total, 20.0);
+        assert_eq!(snapshot.credit_payments_total, 15.0);
+        assert_eq!(snapshot.expected_cash, 140.0);
+        assert_eq!(snapshot.refunds.len(), 1);
+        assert_eq!(snapshot.credit_payments.len(), 1);
+        assert_eq!(snapshot.payment_breakdown.iter().find(|payment| payment.method == "cash").map(|payment| payment.amount), Some(40.0));
+    }
+
+    #[test]
+    fn daily_cut_summary_aggregates_closed_shifts() {
+        let mut conn = flow_conn();
+        let first_session = open_cash_session_with_conn(&conn, 2, 100.0).unwrap();
+        let first_shift_id: i64 = conn
+            .query_row(
+                "SELECT id FROM shifts WHERE cash_session_id = ?1",
+                params![first_session.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        create_sale_with_conn(
+            &mut conn,
+            SaleDraft {
+                cashier_id: 2,
+                customer_id: None,
+                items: vec![SaleItemInput {
+                    product_id: 1,
+                    quantity: 1.0,
+                    unit_price: 20.0,
+                    discount: 0.0,
+                }],
+                payments: vec![PaymentInput {
+                    method: "cash".into(),
+                    amount: 20.0,
+                    reference: None,
+                }],
+                notes: None,
+            },
+        )
+        .unwrap();
+        let first_cut =
+            close_shift_cut_z_with_conn(&mut conn, first_shift_id, 120.0, 2, Some("[]".into()), None)
+                .unwrap();
+
+        let second_session = open_cash_session_with_conn(&conn, 2, 50.0).unwrap();
+        let second_shift_id: i64 = conn
+            .query_row(
+                "SELECT id FROM shifts WHERE cash_session_id = ?1",
+                params![second_session.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        create_sale_with_conn(
+            &mut conn,
+            SaleDraft {
+                cashier_id: 2,
+                customer_id: None,
+                items: vec![SaleItemInput {
+                    product_id: 1,
+                    quantity: 1.0,
+                    unit_price: 20.0,
+                    discount: 0.0,
+                }],
+                payments: vec![PaymentInput {
+                    method: "card".into(),
+                    amount: 20.0,
+                    reference: Some("Terminal".into()),
+                }],
+                notes: None,
+            },
+        )
+        .unwrap();
+        close_shift_cut_z_with_conn(&mut conn, second_shift_id, 50.0, 2, Some("[]".into()), None)
+            .unwrap();
+
+        let date = first_cut.closed_at.clone().unwrap()[..10].to_string();
+        let summary = daily_cut_summary_with_conn(&conn, Some(date)).unwrap();
+        assert_eq!(summary.cut_count, 2);
+        assert_eq!(summary.total_tickets, 2);
+        assert_eq!(summary.net_sales, 40.0);
+        assert_eq!(summary.cash_paid, 20.0);
+        assert_eq!(summary.card_paid, 20.0);
+        assert_eq!(summary.expected_cash, 170.0);
+        assert_eq!(summary.payment_breakdown.iter().find(|payment| payment.method == "cash").map(|payment| payment.amount), Some(20.0));
+        assert_eq!(summary.payment_breakdown.iter().find(|payment| payment.method == "card").map(|payment| payment.amount), Some(20.0));
+        assert_eq!(summary.cuts.len(), 2);
     }
 
     #[test]
@@ -6668,7 +7559,9 @@ pub fn run() {
             open_cash_drawer,
             read_scale,
             settings_get,
+            settings_get_many,
             settings_set,
+            settings_set_many,
             backup_create,
             backup_export_desktop,
             backup_list,

@@ -66,6 +66,7 @@ export function AdminView({
         session={session}
         cashSession={cashSession ?? null}
         tickets={summary?.today_tickets ?? 0}
+        canViewProfit={session.role === "admin" || session.permissions.includes("view_profit")}
         openCash={openCash}
         refreshSummary={refreshSummary}
         showToast={showToast}

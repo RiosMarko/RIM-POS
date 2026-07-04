@@ -177,7 +177,7 @@ let mockCashSession: CashSession | null = {
   sales_total: 0,
   status: "open",
 };
-const allMockPermissions: PermissionKey[] = ["products", "inventory", "customers", "reports", "purchases", "invoices"];
+const allMockPermissions: PermissionKey[] = ["products", "inventory", "customers", "reports", "purchases", "invoices", "view_profit"];
 
 let mockUsers: UserAccount[] = [
   {
@@ -215,6 +215,7 @@ let mockCustomerCreditMovements: Array<{
   id: number;
   customer_name: string;
   amount: number;
+  payment_method: string;
   reason: string;
   created_at: string;
 }> = [];
@@ -657,7 +658,7 @@ export async function upsertCustomer(input: CustomerInput): Promise<Customer> {
   return customer;
 }
 
-export async function adjustCustomerCredit(input: { customer_id: number; amount: number; reason: string }): Promise<Customer> {
+export async function adjustCustomerCredit(input: { customer_id: number; amount: number; reason: string; payment_method?: string }): Promise<Customer> {
   if (isTauri()) {
     return call<Customer>("customer_credit_adjust", { actorId: requireActorId(), input });
   }
@@ -669,6 +670,7 @@ export async function adjustCustomerCredit(input: { customer_id: number; amount:
     id: mockCustomerCreditMovementId,
     customer_name: customer.name,
     amount: input.amount,
+    payment_method: input.payment_method ?? "cash",
     reason: input.reason,
     created_at: new Date().toISOString(),
   });
@@ -988,20 +990,29 @@ function mockShiftCut(status = mockCashSession?.status ?? "closed"): ShiftCutSna
   return {
     shift_id: mockCashSession.id,
     cash_session_id: mockCashSession.id,
+    workstation_id: "CAJA-1",
     status,
     opened_at: mockCashSession.opened_at,
     closed_at: mockCashSession.closed_at ?? null,
+    duration_minutes: 0,
     opened_by_name: "Admin",
     closed_by_name: status === "closed" ? "Admin" : null,
     total_tickets: paidSales.length,
     canceled_tickets: canceledSales.length,
     gross_sales: netSales + discount,
     net_sales: netSales,
+    gross_profit: 0,
     tax,
     discount,
     cash_paid: Math.max(0, cashReceived - changeDue),
     card_paid: paidSales.reduce((sum, sale) => sum + (sale.card_paid ?? 0), 0),
     transfer_paid: paidSales.reduce((sum, sale) => sum + (sale.transfer_paid ?? 0), 0),
+    credit_sales: 0,
+    cash_entries_total: 0,
+    cash_out_total: 0,
+    cash_refunds_total: 0,
+    credit_payments_total: 0,
+    counted_income_total: Math.max(0, cashReceived - changeDue),
     average_ticket: paidSales.length ? netSales / paidSales.length : 0,
     opening_cash: mockCashSession.opening_cash,
     expected_cash: mockCashSession.expected_cash,
@@ -1009,6 +1020,18 @@ function mockShiftCut(status = mockCashSession?.status ?? "closed"): ShiftCutSna
     counted_cash: mockCashSession.closing_cash ?? null,
     cash_difference: mockCashSession.closing_cash == null ? null : mockCashSession.closing_cash - mockCashSession.expected_cash,
     difference_reason: null,
+    payment_breakdown: [
+      { method: "cash", label: "Efectivo", amount: Math.max(0, cashReceived - changeDue), counts_as_cash: true },
+      { method: "card", label: "Tarjeta", amount: paidSales.reduce((sum, sale) => sum + (sale.card_paid ?? 0), 0), counts_as_cash: false },
+      { method: "transfer", label: "Transferencia", amount: paidSales.reduce((sum, sale) => sum + (sale.transfer_paid ?? 0), 0), counts_as_cash: false },
+    ].filter((payment) => payment.amount > 0),
+    departments: [],
+    cash_movements: [],
+    refunds: [],
+    credit_payments: [],
+    taxes: [],
+    top_customers_by_sales: [],
+    top_customers_by_profit: [],
   };
 }
 
@@ -1124,16 +1147,30 @@ function emptyDailyCutSummary(date = new Date().toISOString().slice(0, 10)): Dai
     canceled_tickets: 0,
     gross_sales: 0,
     net_sales: 0,
+    gross_profit: 0,
     tax: 0,
     discount: 0,
     cash_paid: 0,
     card_paid: 0,
     transfer_paid: 0,
+    credit_sales: 0,
+    cash_entries_total: 0,
+    cash_out_total: 0,
+    cash_refunds_total: 0,
+    credit_payments_total: 0,
+    counted_income_total: 0,
     average_ticket: 0,
     opening_cash: 0,
     expected_cash: 0,
     counted_cash: 0,
     cash_difference: 0,
+    payment_breakdown: [],
+    departments: [],
+    refunds: [],
+    credit_payments: [],
+    taxes: [],
+    top_customers_by_sales: [],
+    top_customers_by_profit: [],
     cuts: [],
   };
 }
@@ -1152,16 +1189,30 @@ export async function getDailyCutSummary(date?: string): Promise<DailyCutSummary
   summary.canceled_tickets = cuts.reduce((sum, cut) => sum + cut.canceled_tickets, 0);
   summary.gross_sales = cuts.reduce((sum, cut) => sum + cut.gross_sales, 0);
   summary.net_sales = cuts.reduce((sum, cut) => sum + cut.net_sales, 0);
+  summary.gross_profit = cuts.reduce((sum, cut) => sum + (cut.gross_profit ?? 0), 0);
   summary.tax = cuts.reduce((sum, cut) => sum + cut.tax, 0);
   summary.discount = cuts.reduce((sum, cut) => sum + cut.discount, 0);
   summary.cash_paid = cuts.reduce((sum, cut) => sum + cut.cash_paid, 0);
   summary.card_paid = cuts.reduce((sum, cut) => sum + cut.card_paid, 0);
   summary.transfer_paid = cuts.reduce((sum, cut) => sum + cut.transfer_paid, 0);
+  summary.credit_sales = cuts.reduce((sum, cut) => sum + (cut.credit_sales ?? 0), 0);
+  summary.cash_entries_total = cuts.reduce((sum, cut) => sum + (cut.cash_entries_total ?? 0), 0);
+  summary.cash_out_total = cuts.reduce((sum, cut) => sum + (cut.cash_out_total ?? 0), 0);
+  summary.cash_refunds_total = cuts.reduce((sum, cut) => sum + (cut.cash_refunds_total ?? 0), 0);
+  summary.credit_payments_total = cuts.reduce((sum, cut) => sum + (cut.credit_payments_total ?? 0), 0);
+  summary.counted_income_total = cuts.reduce((sum, cut) => sum + (cut.counted_income_total ?? 0), 0);
   summary.opening_cash = cuts.reduce((sum, cut) => sum + cut.opening_cash, 0);
   summary.expected_cash = cuts.reduce((sum, cut) => sum + cut.expected_cash, 0);
   summary.counted_cash = cuts.reduce((sum, cut) => sum + (cut.counted_cash ?? cut.closing_cash ?? 0), 0);
   summary.cash_difference = cuts.reduce((sum, cut) => sum + (cut.cash_difference ?? 0), 0);
   summary.average_ticket = summary.total_tickets ? summary.net_sales / summary.total_tickets : 0;
+  summary.payment_breakdown = cuts.flatMap((cut) => cut.payment_breakdown ?? []);
+  summary.departments = cuts.flatMap((cut) => cut.departments ?? []);
+  summary.refunds = cuts.flatMap((cut) => cut.refunds ?? []);
+  summary.credit_payments = cuts.flatMap((cut) => cut.credit_payments ?? []);
+  summary.taxes = cuts.flatMap((cut) => cut.taxes ?? []);
+  summary.top_customers_by_sales = cuts.flatMap((cut) => cut.top_customers_by_sales ?? []);
+  summary.top_customers_by_profit = cuts.flatMap((cut) => cut.top_customers_by_profit ?? []);
   return summary;
 }
 
@@ -1440,11 +1491,30 @@ export async function getSetting(key: string): Promise<string | null> {
   return mockSettings.get(key) ?? null;
 }
 
+export async function getSettings(keys: string[]): Promise<Record<string, string | null>> {
+  if (isTauri()) {
+    return call<Record<string, string | null>>("settings_get_many", {
+      actorId: requireActorId(),
+      keys,
+    });
+  }
+  return Object.fromEntries(keys.map((key) => [key, mockSettings.get(key) ?? null]));
+}
+
 export async function setSetting(key: string, value: string): Promise<void> {
   if (isTauri()) {
     return call<void>("settings_set", { actorId: requireActorId(), key, value });
   }
   mockSettings.set(key, value);
+}
+
+export async function setSettings(entries: Record<string, string>): Promise<void> {
+  if (isTauri()) {
+    return call<void>("settings_set_many", { actorId: requireActorId(), entries });
+  }
+  Object.entries(entries).forEach(([key, value]) => {
+    mockSettings.set(key, value);
+  });
 }
 
 export async function listHardwareDevices(options?: { includeNetwork?: boolean }): Promise<HardwareDevice[]> {

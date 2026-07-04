@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Setting } from "../../components/display/SummaryCards";
 import { loadCardTerminals, saveCardTerminals } from "../../lib/cardTerminals";
 import { selectNumericInput } from "../../lib/numberInput";
-import { getSetting, listHardwareDevices, openDrawer, printTicket, readScale, setSetting } from "../../lib/posApi";
+import { getSettings, listHardwareDevices, openDrawer, printTicket, readScale, setSettings } from "../../lib/posApi";
 import type { HardwareDevice } from "../../types";
 
 export function SettingsView({
@@ -43,6 +43,32 @@ export function SettingsView({
   const [devices, setDevices] = useState<HardwareDevice[]>([]);
   const [detecting, setDetecting] = useState(false);
 
+  const settingsKeys = useMemo(() => [
+    "printer",
+    "workstation_id",
+    "scale",
+    "scale_baud_rate",
+    "drawer",
+    "tax_enabled",
+    "tax_country",
+    "tax_default_rate",
+    "tax_prices_include_tax",
+    "tax_show_breakdown",
+    "tax_auto_apply_new_products",
+    "ticket_store_name",
+    "ticket_header",
+    "ticket_footer",
+    "ticket_width",
+    "ticket_show_logo",
+    "ticket_show_date",
+    "ticket_show_cashier",
+    "ticket_show_barcode",
+    "ticket_show_item_count",
+    "ticket_start_lines",
+    "ticket_extra_lines",
+    "ticket_copies",
+  ], []);
+
   const printers = useMemo(() => devices.filter((device) => device.device_type === "printer"), [devices]);
   const serialDevices = useMemo(() => devices.filter((device) => device.device_type === "serial"), [devices]);
   const printerDevices = useMemo(() => {
@@ -66,15 +92,25 @@ export function SettingsView({
 
     if (nextPrinter !== current.printer) {
       setPrinter(nextPrinter);
-      await setSetting("printer", nextPrinter);
     }
     if (nextScale !== current.scale) {
       setScale(nextScale);
-      await setSetting("scale", nextScale);
     }
     if (nextDrawer !== current.drawer) {
       setDrawer(nextDrawer);
-      await setSetting("drawer", nextDrawer);
+    }
+    const updates: Record<string, string> = {};
+    if (nextPrinter !== current.printer) {
+      updates.printer = nextPrinter;
+    }
+    if (nextScale !== current.scale) {
+      updates.scale = nextScale;
+    }
+    if (nextDrawer !== current.drawer) {
+      updates.drawer = nextDrawer;
+    }
+    if (Object.keys(updates).length > 0) {
+      await setSettings(updates);
     }
   };
 
@@ -96,56 +132,31 @@ export function SettingsView({
 
   useEffect(() => {
     setCardTerminals(loadCardTerminals());
-    Promise.all([
-      getSetting("printer"),
-      getSetting("workstation_id"),
-      getSetting("scale"),
-      getSetting("scale_baud_rate"),
-      getSetting("drawer"),
-      getSetting("tax_enabled"),
-      getSetting("tax_country"),
-      getSetting("tax_default_rate"),
-      getSetting("tax_prices_include_tax"),
-      getSetting("tax_show_breakdown"),
-      getSetting("tax_auto_apply_new_products"),
-      getSetting("ticket_store_name"),
-      getSetting("ticket_header"),
-      getSetting("ticket_footer"),
-      getSetting("ticket_width"),
-      getSetting("ticket_show_logo"),
-      getSetting("ticket_show_date"),
-      getSetting("ticket_show_cashier"),
-      getSetting("ticket_show_barcode"),
-      getSetting("ticket_show_item_count"),
-      getSetting("ticket_start_lines"),
-      getSetting("ticket_extra_lines"),
-      getSetting("ticket_copies"),
-    ])
-      .then(([
-        nextPrinter,
-        nextWorkstationId,
-        nextScale,
-        nextScaleBaudRate,
-        nextDrawer,
-        nextTaxEnabled,
-        nextTaxCountry,
-        nextTaxDefaultRate,
-        nextTaxPricesIncludeTax,
-        nextTaxShowBreakdown,
-        nextTaxAutoApply,
-        nextTicketStoreName,
-        nextTicketHeader,
-        nextTicketFooter,
-        nextTicketWidth,
-        nextTicketShowLogo,
-        nextTicketShowDate,
-        nextTicketShowCashier,
-        nextTicketShowBarcode,
-        nextTicketShowItemCount,
-        nextTicketStartLines,
-        nextTicketExtraLines,
-        nextTicketCopies,
-      ]) => {
+    getSettings(settingsKeys)
+      .then((settings) => {
+        const nextPrinter = settings.printer;
+        const nextWorkstationId = settings.workstation_id;
+        const nextScale = settings.scale;
+        const nextScaleBaudRate = settings.scale_baud_rate;
+        const nextDrawer = settings.drawer;
+        const nextTaxEnabled = settings.tax_enabled;
+        const nextTaxCountry = settings.tax_country;
+        const nextTaxDefaultRate = settings.tax_default_rate;
+        const nextTaxPricesIncludeTax = settings.tax_prices_include_tax;
+        const nextTaxShowBreakdown = settings.tax_show_breakdown;
+        const nextTaxAutoApply = settings.tax_auto_apply_new_products;
+        const nextTicketStoreName = settings.ticket_store_name;
+        const nextTicketHeader = settings.ticket_header;
+        const nextTicketFooter = settings.ticket_footer;
+        const nextTicketWidth = settings.ticket_width;
+        const nextTicketShowLogo = settings.ticket_show_logo;
+        const nextTicketShowDate = settings.ticket_show_date;
+        const nextTicketShowCashier = settings.ticket_show_cashier;
+        const nextTicketShowBarcode = settings.ticket_show_barcode;
+        const nextTicketShowItemCount = settings.ticket_show_item_count;
+        const nextTicketStartLines = settings.ticket_start_lines;
+        const nextTicketExtraLines = settings.ticket_extra_lines;
+        const nextTicketCopies = settings.ticket_copies;
         const nextHardware = {
           printer: nextPrinter || "mock-printer-80mm",
           scale: nextScale || "mock-scale-serial",
@@ -176,15 +187,9 @@ export function SettingsView({
         setTicketExtraLines(Number(nextTicketExtraLines ?? 3));
         setTicketCopies(Number(nextTicketCopies ?? 1));
         onTaxModeChange({ enabled, pricesIncludeTax: nextTaxPricesIncludeTax !== "false" });
-        listHardwareDevices()
-          .then(async (result) => {
-            setDevices(result);
-            await syncDetectedDevices(result, nextHardware);
-          })
-          .catch(() => setDevices([]));
       })
       .catch((error) => showToast(String(error)));
-  }, [onTaxModeChange, showToast]);
+  }, [onTaxModeChange, settingsKeys, showToast]);
 
   const addCardTerminal = () => {
     const name = cardTerminalDraft.trim();
@@ -246,29 +251,31 @@ export function SettingsView({
   const save = async () => {
     const previewSettings = ticketPreviewDirty ? deriveTicketPreviewSettings(ticketPreviewDraft) : null;
     try {
-      await setSetting("printer", printer);
-      await setSetting("workstation_id", workstationId.trim() || "CAJA-1");
-      await setSetting("scale", scale);
-      await setSetting("scale_baud_rate", String(scaleBaudRate));
-      await setSetting("drawer", drawer);
-      await setSetting("tax_enabled", String(taxEnabled));
-      await setSetting("tax_country", taxCountry);
-      await setSetting("tax_default_rate", String(taxDefaultRate));
-      await setSetting("tax_prices_include_tax", String(taxPricesIncludeTax));
-      await setSetting("tax_show_breakdown", String(taxShowBreakdown));
-      await setSetting("tax_auto_apply_new_products", String(taxAutoApply));
-      await setSetting("ticket_store_name", ticketStoreName);
-      await setSetting("ticket_header", previewSettings?.header ?? ticketHeader);
-      await setSetting("ticket_footer", previewSettings?.footer ?? ticketFooter);
-      await setSetting("ticket_width", String(ticketWidth));
-      await setSetting("ticket_show_logo", String(ticketShowLogo));
-      await setSetting("ticket_show_date", String(ticketShowDate));
-      await setSetting("ticket_show_cashier", String(ticketShowCashier));
-      await setSetting("ticket_show_barcode", String(ticketShowBarcode));
-      await setSetting("ticket_show_item_count", String(ticketShowItemCount));
-      await setSetting("ticket_start_lines", String(previewSettings?.startLines ?? ticketStartLines));
-      await setSetting("ticket_extra_lines", String(previewSettings?.extraLines ?? ticketExtraLines));
-      await setSetting("ticket_copies", String(ticketCopies));
+      await setSettings({
+        printer,
+        workstation_id: workstationId.trim() || "CAJA-1",
+        scale,
+        scale_baud_rate: String(scaleBaudRate),
+        drawer,
+        tax_enabled: String(taxEnabled),
+        tax_country: taxCountry,
+        tax_default_rate: String(taxDefaultRate),
+        tax_prices_include_tax: String(taxPricesIncludeTax),
+        tax_show_breakdown: String(taxShowBreakdown),
+        tax_auto_apply_new_products: String(taxAutoApply),
+        ticket_store_name: ticketStoreName,
+        ticket_header: previewSettings?.header ?? ticketHeader,
+        ticket_footer: previewSettings?.footer ?? ticketFooter,
+        ticket_width: String(ticketWidth),
+        ticket_show_logo: String(ticketShowLogo),
+        ticket_show_date: String(ticketShowDate),
+        ticket_show_cashier: String(ticketShowCashier),
+        ticket_show_barcode: String(ticketShowBarcode),
+        ticket_show_item_count: String(ticketShowItemCount),
+        ticket_start_lines: String(previewSettings?.startLines ?? ticketStartLines),
+        ticket_extra_lines: String(previewSettings?.extraLines ?? ticketExtraLines),
+        ticket_copies: String(ticketCopies),
+      });
       if (previewSettings) {
         setTicketHeader(previewSettings.header);
         setTicketFooter(previewSettings.footer);
@@ -284,10 +291,12 @@ export function SettingsView({
   };
 
   const saveHardwareSettings = async () => {
-    await setSetting("printer", printer);
-    await setSetting("scale", scale);
-    await setSetting("scale_baud_rate", String(scaleBaudRate));
-    await setSetting("drawer", drawer);
+    await setSettings({
+      printer,
+      scale,
+      scale_baud_rate: String(scaleBaudRate),
+      drawer,
+    });
   };
 
   const testPrinter = async () => {
@@ -306,7 +315,7 @@ export function SettingsView({
       const result = await readScale();
       if (result.baud_rate !== scaleBaudRate) {
         setScaleBaudRate(result.baud_rate);
-        await setSetting("scale_baud_rate", String(result.baud_rate));
+        await setSettings({ scale_baud_rate: String(result.baud_rate) });
       }
       showToast(`${result.weight} ${result.unit} · ${result.baud_rate} baud`);
     } catch (error) {
@@ -560,9 +569,7 @@ export function SettingsView({
                 <select
                   value={scaleBaudRate}
                   onChange={(event) => {
-                    const next = Number(event.target.value);
-                    setScaleBaudRate(next);
-                    void setSetting("scale_baud_rate", String(next));
+                    setScaleBaudRate(Number(event.target.value));
                   }}
                 >
                   <option value={2400}>2400</option>

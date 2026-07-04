@@ -32,7 +32,7 @@ export function CustomersView({ showToast }: { showToast: (message: string) => v
     }
   };
 
-  const saveCredit = async (amount: number, reason: string) => {
+  const saveCredit = async (amount: number, reason: string, paymentMethod?: "cash" | "card" | "transfer") => {
     if (!creditDraft) return;
     const signedAmount = creditDraft.mode === "charge" ? amount : -amount;
     const nextBalance = creditDraft.customer.balance + signedAmount;
@@ -49,7 +49,12 @@ export function CustomersView({ showToast }: { showToast: (message: string) => v
       return;
     }
     try {
-      await adjustCustomerCredit({ customer_id: creditDraft.customer.id, amount: signedAmount, reason });
+      await adjustCustomerCredit({
+        customer_id: creditDraft.customer.id,
+        amount: signedAmount,
+        reason,
+        payment_method: creditDraft.mode === "payment" ? paymentMethod : undefined,
+      });
       setCreditDraft(null);
       await refresh();
       showToast("Credito actualizado");

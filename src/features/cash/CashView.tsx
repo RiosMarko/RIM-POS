@@ -11,7 +11,6 @@ import {
   closeShiftCutZ,
   createCashMovement,
   getDailyCutSummary,
-  getProductSalesReport,
   listAuditLog,
   listCashCounts,
   getShiftCutX,
@@ -21,13 +20,14 @@ import {
   printDailyCut,
   printShiftCut,
 } from "../../lib/posApi";
-import type { AuditLogEntry, CashCount, CashMovement, CashSession, DailyCutSummary, ProductSalesReport, SaleListItem, ShiftCutSnapshot, UserSession } from "../../types";
+import type { AuditLogEntry, CashCount, CashMovement, CashSession, DailyCutSummary, SaleListItem, ShiftCutSnapshot, UserSession } from "../../types";
 import { CashDialog, SaleCancelModal } from "./CashModals";
 
 export function CashView({
   session,
   cashSession,
   tickets,
+  canViewProfit,
   openCash,
   refreshSummary,
   showToast,
@@ -36,6 +36,7 @@ export function CashView({
   session: UserSession;
   cashSession: CashSession | null;
   tickets: number;
+  canViewProfit: boolean;
   openCash: (openingCash?: number) => void;
   refreshSummary: () => Promise<void>;
   showToast: (message: string) => void;
@@ -46,10 +47,10 @@ export function CashView({
   const [cuts, setCuts] = useState<ShiftCutSnapshot[]>([]);
   const [auditLog, setAuditLog] = useState<AuditLogEntry[]>([]);
   const [sales, setSales] = useState<SaleListItem[]>([]);
-  const [departmentRows, setDepartmentRows] = useState<ProductSalesReport[]>([]);
   const [cashDialog, setCashDialog] = useState<"open" | "in" | "out" | "audit" | "close" | null>(null);
   const [cutSnapshot, setCutSnapshot] = useState<ShiftCutSnapshot | null>(null);
   const [dailyCut, setDailyCut] = useState<DailyCutSummary | null>(null);
+  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().slice(0, 10));
   const [cancelDraft, setCancelDraft] = useState<SaleListItem | null>(null);
   const [cancelAdminDraft, setCancelAdminDraft] = useState<{ sale: SaleListItem; reason: string } | null>(null);
   const paidSales = useMemo(() => sales.filter((sale) => sale.status === "paid"), [sales]);
@@ -58,39 +59,23 @@ export function CashView({
   const transferSales = useMemo(() => paidSales.reduce((sum, sale) => sum + (sale.transfer_paid ?? 0), 0), [paidSales]);
   const expectedCash = cashSession?.expected_cash ?? 0;
   const totalSales = cashSales + cardSales + transferSales;
-  const cashEntries = useMemo(() => movements.filter((movement) => movement.movement_type === "in").reduce((sum, movement) => sum + movement.amount, 0), [movements]);
-  const cashOut = useMemo(() => movements.filter((movement) => movement.movement_type === "out").reduce((sum, movement) => sum + movement.amount, 0), [movements]);
-  const cashInDrawer = cutSnapshot?.closing_cash ?? ((cashSession?.opening_cash ?? 0) + cashSales + cashEntries - cashOut);
+  const cutVisible = Boolean(cutSnapshot || dailyCut);
   const cutOwner = cutSnapshot?.opened_by_name || session.name;
   const cutStarted = cutSnapshot?.opened_at ?? cashSession?.opened_at ?? new Date().toISOString();
   const cutEnded = cutSnapshot?.closed_at ?? new Date().toISOString();
   const cutDifference = cutSnapshot ? cutSnapshot.cash_difference ?? ((cutSnapshot.closing_cash ?? cutSnapshot.expected_cash) - cutSnapshot.expected_cash) : 0;
   const cutCountedCash = cutSnapshot?.counted_cash ?? cutSnapshot?.closing_cash ?? null;
   const cutStatusLabel = cutSnapshot?.status === "closed" ? "Corte Z cerrado" : "Corte X consulta";
-  const outMovements = useMemo(() => movements.filter((movement) => movement.movement_type === "out"), [movements]);
   const cutDifferenceClass = cutDifference === 0 ? "balanced" : cutDifference > 0 ? "positive" : "negative";
   const dailyDifferenceClass = !dailyCut || dailyCut.cash_difference === 0 ? "balanced" : dailyCut.cash_difference > 0 ? "positive" : "negative";
-  const departmentTotals = useMemo(() => {
-    const totals = new Map<string, number>();
-    departmentRows.forEach((row) => {
-      const key = row.category || "- Sin Departamento -";
-      totals.set(key, (totals.get(key) ?? 0) + row.total);
-    });
-    return Array.from(totals, ([name, total]) => ({ name, total })).sort((left, right) => right.total - left.total);
-  }, [departmentRows]);
 
   const refresh = useCallback(async () => {
     if (cashSession) {
       setMovements(await listCashMovements(cashSession.id));
       setCounts(await listCashCounts(cashSession.id));
-      setDepartmentRows(await getProductSalesReport({
-        fromDate: cashSession.opened_at.slice(0, 10),
-        toDate: (cashSession.closed_at ?? new Date().toISOString()).slice(0, 10),
-      }));
     } else {
       setMovements([]);
       setCounts([]);
-      setDepartmentRows([]);
     }
     setCuts(await listShiftCuts());
     if (session.role === "admin") setAuditLog(await listAuditLog());
@@ -156,6 +141,7 @@ export function CashView({
   const partialCut = async () => {
     try {
       const snapshot = await getShiftCutX();
+      setDailyCut(null);
       setCutSnapshot(snapshot);
       showToast(`Corte X: ${snapshot.total_tickets} tickets, ${money(snapshot.net_sales)}`);
     } catch (error) {
@@ -181,6 +167,7 @@ export function CashView({
             denominations_json: denominationsJson,
             difference_reason: differenceReason || null,
           });
+          setDailyCut(null);
           setCutSnapshot(snapshot);
           await refresh();
           await refreshSummary();
@@ -194,7 +181,8 @@ export function CashView({
 
   const generalCut = async () => {
     try {
-      const summary = await getDailyCutSummary();
+      const summary = await getDailyCutSummary(selectedDate);
+      setCutSnapshot(null);
       setDailyCut(summary);
       showToast(`Corte general: ${summary.cut_count} turnos, ${money(summary.net_sales)}`);
     } catch (error) {
@@ -205,10 +193,10 @@ export function CashView({
   return (
     <section className="admin-panel compact">
       <div className="metric-grid">
-        <Metric icon={Banknote} label="Esperado" value={money(expectedCash)} />
-        <Metric icon={ShoppingCart} label="Efectivo" value={money(cashSales)} />
-        <Metric icon={FileText} label="Tarjeta" value={money(cardSales)} />
-        <Metric icon={BarChart3} label="Crédito" value={money(transferSales)} />
+        <Metric icon={Banknote} label="Esperado" value={cutVisible ? money(cutSnapshot?.expected_cash ?? dailyCut?.expected_cash ?? expectedCash) : "Oculto"} />
+        <Metric icon={ShoppingCart} label="Efectivo" value={cutVisible ? money(cutSnapshot?.cash_paid ?? dailyCut?.cash_paid ?? cashSales) : "Oculto"} />
+        <Metric icon={FileText} label="Tarjeta" value={cutVisible ? money(cutSnapshot?.card_paid ?? dailyCut?.card_paid ?? cardSales) : "Oculto"} />
+        <Metric icon={BarChart3} label="Transferencia" value={cutVisible ? money(cutSnapshot?.transfer_paid ?? dailyCut?.transfer_paid ?? transferSales) : "Oculto"} />
       </div>
       <div className="cash-actions">
         <button className="primary-button" type="button" disabled={Boolean(cashSession)} onClick={() => setCashDialog("open")}>
@@ -249,6 +237,7 @@ export function CashView({
         >
           Corte general
         </button>
+        <input type="date" value={selectedDate} onChange={(event) => setSelectedDate(event.target.value)} aria-label="Fecha corte general" />
       </div>
       {dailyCut && (
         <div className="cut-detail daily-cut-detail">
@@ -274,6 +263,13 @@ export function CashView({
               <strong>{money(dailyCut.net_sales)}</strong>
               <small>{dailyCut.total_tickets} tickets</small>
             </div>
+            {canViewProfit && (
+              <div className="cut-kpi">
+                <span>Ganancia</span>
+                <strong>{money(dailyCut.gross_profit ?? 0)}</strong>
+                <small>Margen consolidado</small>
+              </div>
+            )}
             <div className="cut-kpi">
               <span>Turnos cerrados</span>
               <strong>{dailyCut.cut_count}</strong>
@@ -295,28 +291,33 @@ export function CashView({
               <h3>Efectivo consolidado <strong>{money(dailyCut.expected_cash)}</strong></h3>
               <div className="cut-line"><span>Fondos iniciales</span><strong>{money(dailyCut.opening_cash)}</strong></div>
               <div className="cut-line positive"><span>Ventas efectivo</span><strong>{money(dailyCut.cash_paid)}</strong></div>
+              <div className="cut-line positive"><span>Entradas</span><strong>{money(dailyCut.cash_entries_total ?? 0)}</strong></div>
+              <div className="cut-line negative"><span>Salidas</span><strong>-{money(dailyCut.cash_out_total ?? 0)}</strong></div>
+              <div className="cut-line negative"><span>Devoluciones efectivo</span><strong>-{money(dailyCut.cash_refunds_total ?? 0)}</strong></div>
+              <div className="cut-line positive"><span>Abonos credito efectivo</span><strong>{money(dailyCut.credit_payments_total ?? 0)}</strong></div>
               <div className="cut-line"><span>Esperado</span><strong>{money(dailyCut.expected_cash)}</strong></div>
               <div className="cut-line total"><span>Contado final</span><strong>{money(dailyCut.counted_cash)}</strong></div>
             </div>
             <div className="cut-detail-section">
               <h3>Ventas consolidadas</h3>
               <div className="cut-payment-grid">
-                <div><Banknote size={18} /><span>Efectivo</span><strong>{money(dailyCut.cash_paid)}</strong></div>
-                <div><FileText size={18} /><span>Tarjeta</span><strong>{money(dailyCut.card_paid)}</strong></div>
-                <div><CalendarDays size={18} /><span>Credito</span><strong>{money(dailyCut.transfer_paid)}</strong></div>
+                {(dailyCut.payment_breakdown ?? []).map((payment) => (
+                  <div key={payment.method}><Banknote size={18} /><span>{payment.label}</span><strong>{money(payment.amount)}</strong></div>
+                ))}
               </div>
               <div className="cut-line total"><span>Total vendido</span><strong>{money(dailyCut.net_sales)}</strong></div>
               <div className="cut-line"><span>Ticket promedio</span><strong>{money(dailyCut.average_ticket)}</strong></div>
               <div className="cut-line"><span>Impuestos</span><strong>{money(dailyCut.tax)}</strong></div>
+              <div className="cut-line"><span>Ventas a credito</span><strong>{money(dailyCut.credit_sales ?? 0)}</strong></div>
             </div>
             <div className="cut-detail-section daily-cut-list">
-              <h3>Cortes incluidos</h3>
-              {dailyCut.cuts.length === 0 ? (
-                <span className="muted-note">Sin Cortes Z cerrados hoy</span>
-              ) : dailyCut.cuts.map((cut) => (
-                <div className="cut-line" key={cut.shift_id}>
-                  <span>#{cut.shift_id} {cut.closed_by_name || cut.opened_by_name || "sin cajero"}</span>
-                  <strong>{money(cut.net_sales)}</strong>
+              <h3>Departamentos</h3>
+              {(dailyCut.departments ?? []).length === 0 ? (
+                <span className="muted-note">Sin departamentos</span>
+              ) : (dailyCut.departments ?? []).slice(0, 10).map((department) => (
+                <div className="cut-line" key={department.category}>
+                  <span>{department.category}</span>
+                  <strong>{money(department.total_sales)}</strong>
                 </div>
               ))}
             </div>
@@ -324,7 +325,30 @@ export function CashView({
               <h3>Resumen</h3>
               <div className="cut-line"><span>Cancelados</span><strong>{dailyCut.canceled_tickets}</strong></div>
               <div className="cut-line"><span>Descuentos</span><strong>{money(dailyCut.discount)}</strong></div>
+              <div className="cut-line"><span>Devoluciones</span><strong>{(dailyCut.refunds ?? []).length}</strong></div>
               <div className={`cut-line ${dailyDifferenceClass}`}><span>Diferencia</span><strong>{money(dailyCut.cash_difference)}</strong></div>
+            </div>
+            <div className="cut-detail-section">
+              <h3>Impuestos</h3>
+              {(dailyCut.taxes ?? []).length === 0 ? (
+                <span className="muted-note">Sin impuestos</span>
+              ) : (dailyCut.taxes ?? []).slice(0, 8).map((tax) => (
+                <div className="cut-line" key={`${tax.tax_name}-${tax.rate}`}>
+                  <span>{tax.tax_name} {Math.round(tax.rate * 100)}%</span>
+                  <strong>{money(tax.tax_collected)}</strong>
+                </div>
+              ))}
+            </div>
+            <div className="cut-detail-section">
+              <h3>Top clientes</h3>
+              {(dailyCut.top_customers_by_sales ?? []).length === 0 ? (
+                <span className="muted-note">Sin clientes identificados</span>
+              ) : (dailyCut.top_customers_by_sales ?? []).map((customer) => (
+                <div className="cut-line" key={`sale-${customer.customer_id}`}>
+                  <span>{customer.customer_name}</span>
+                  <strong>{money(customer.total_sales)}</strong>
+                </div>
+              ))}
             </div>
           </div>
         </div>
@@ -359,6 +383,13 @@ export function CashView({
               <strong>{money(cutSnapshot.net_sales)}</strong>
               <small>{cutSnapshot.total_tickets} tickets</small>
             </div>
+            {canViewProfit && (
+              <div className="cut-kpi">
+                <span>Ganancia</span>
+                <strong>{money(cutSnapshot.gross_profit ?? 0)}</strong>
+                <small>Margen de turno</small>
+              </div>
+            )}
             <div className="cut-kpi">
               <span>Efectivo esperado</span>
               <strong>{money(cutSnapshot.expected_cash)}</strong>
@@ -377,43 +408,69 @@ export function CashView({
           </div>
           <div className="cut-detail-grid">
             <div className="cut-detail-section cut-cash-card">
-              <h3>Formula de caja <strong>{money(cashInDrawer)}</strong></h3>
+              <h3>Formula de caja <strong>{money(cutSnapshot.expected_cash)}</strong></h3>
               <div className="cut-line"><span>Fondo inicial</span><strong>{money(cutSnapshot.opening_cash)}</strong></div>
               <div className="cut-line positive"><span>Ventas en efectivo</span><strong>{money(cutSnapshot.cash_paid)}</strong></div>
-              <div className="cut-line positive"><span>Entradas</span><strong>{money(cashEntries)}</strong></div>
-              <div className="cut-line negative"><span>Salidas</span><strong>-{money(cashOut)}</strong></div>
-              <div className="cut-line total"><span>Dinero en caja</span><strong>{money(cashInDrawer)}</strong></div>
+              <div className="cut-line positive"><span>Entradas</span><strong>{money(cutSnapshot.cash_entries_total ?? 0)}</strong></div>
+              <div className="cut-line negative"><span>Salidas</span><strong>-{money(cutSnapshot.cash_out_total ?? 0)}</strong></div>
+              <div className="cut-line negative"><span>Devoluciones efectivo</span><strong>-{money(cutSnapshot.cash_refunds_total ?? 0)}</strong></div>
+              <div className="cut-line positive"><span>Abonos credito efectivo</span><strong>{money(cutSnapshot.credit_payments_total ?? 0)}</strong></div>
+              <div className="cut-line total"><span>Esperado</span><strong>{money(cutSnapshot.expected_cash)}</strong></div>
             </div>
             <div className="cut-detail-section">
               <h3>Ventas por forma de pago</h3>
               <div className="cut-payment-grid">
-                <div><Banknote size={18} /><span>Efectivo</span><strong>{money(cutSnapshot.cash_paid)}</strong></div>
-                <div><FileText size={18} /><span>Tarjeta</span><strong>{money(cutSnapshot.card_paid)}</strong></div>
-                <div><CalendarDays size={18} /><span>Credito</span><strong>{money(cutSnapshot.transfer_paid)}</strong></div>
+                {(cutSnapshot.payment_breakdown ?? []).map((payment) => (
+                  <div key={payment.method}><Banknote size={18} /><span>{payment.label}</span><strong>{money(payment.amount)}</strong></div>
+                ))}
               </div>
               <div className="cut-line total"><span>Total vendido</span><strong>{money(cutSnapshot.net_sales)}</strong></div>
               <div className="cut-line"><span>Ticket promedio</span><strong>{money(cutSnapshot.average_ticket)}</strong></div>
               <div className="cut-line"><span>Impuestos</span><strong>{money(cutSnapshot.tax)}</strong></div>
+              <div className="cut-line"><span>Ventas a credito</span><strong>{money(cutSnapshot.credit_sales ?? 0)}</strong></div>
             </div>
             <div className="cut-detail-section">
               <h3>Ventas por departamento</h3>
-              {departmentTotals.length === 0 ? (
+              {(cutSnapshot.departments ?? []).length === 0 ? (
                 <span className="muted-note">Sin departamentos</span>
-              ) : departmentTotals.slice(0, 12).map((department) => (
-                <div className="cut-line" key={department.name}><span>{department.name}</span><strong>{money(department.total)}</strong></div>
+              ) : (cutSnapshot.departments ?? []).slice(0, 12).map((department) => (
+                <div className="cut-line" key={department.category}><span>{department.category}</span><strong>{money(department.total_sales)}</strong></div>
               ))}
             </div>
             <div className="cut-detail-section">
-              <h3>Salidas de efectivo</h3>
-              {outMovements.length === 0 ? (
-                <span className="muted-note">No hubo salidas</span>
-              ) : outMovements.slice(0, 8).map((movement) => (
+              <h3>Movimientos de caja</h3>
+              {(cutSnapshot.cash_movements ?? []).length === 0 ? (
+                <span className="muted-note">Sin movimientos</span>
+              ) : (cutSnapshot.cash_movements ?? []).slice(0, 8).map((movement) => (
                 <div className="cut-line" key={movement.id}><span>{formatDateMx(movement.created_at)} {formatTimeMx(movement.created_at)} {movement.reason}</span><strong>{money(movement.amount)}</strong></div>
               ))}
               <h3>Resumen</h3>
               <div className="cut-line"><span>Tickets</span><strong>{cutSnapshot.total_tickets}</strong></div>
               <div className="cut-line"><span>Cancelados</span><strong>{cutSnapshot.canceled_tickets}</strong></div>
+              <div className="cut-line"><span>Devoluciones</span><strong>{(cutSnapshot.refunds ?? []).length}</strong></div>
               <div className={`cut-line ${cutDifferenceClass}`}><span>Diferencia</span><strong>{money(cutDifference)}</strong></div>
+            </div>
+            <div className="cut-detail-section">
+              <h3>Impuestos</h3>
+              {(cutSnapshot.taxes ?? []).length === 0 ? (
+                <span className="muted-note">Sin impuestos</span>
+              ) : (cutSnapshot.taxes ?? []).slice(0, 8).map((tax) => (
+                <div className="cut-line" key={`${tax.tax_name}-${tax.rate}`}>
+                  <span>{tax.tax_name} {Math.round(tax.rate * 100)}%</span>
+                  <strong>{money(tax.tax_collected)}</strong>
+                </div>
+              ))}
+            </div>
+            <div className="cut-detail-section">
+              <h3>Top clientes</h3>
+              {(cutSnapshot.top_customers_by_sales ?? []).length === 0 ? (
+                <span className="muted-note">Sin clientes identificados</span>
+              ) : (cutSnapshot.top_customers_by_sales ?? []).map((customer) => (
+                <div className="cut-line" key={`customer-${customer.customer_id}`}>
+                  <span>{customer.customer_name}</span>
+                  <strong>{money(customer.total_sales)}</strong>
+                </div>
+              ))}
             </div>
           </div>
         </div>

@@ -9,6 +9,7 @@ export type CustomerCreditDraft = {
   mode: "charge" | "payment";
   initialAmount?: number;
   reason?: string;
+  paymentMethod?: "cash" | "card" | "transfer";
 };
 
 export function CustomerCreditModal({
@@ -18,10 +19,11 @@ export function CustomerCreditModal({
 }: {
   draft: CustomerCreditDraft;
   onClose: () => void;
-  onSave: (amount: number, reason: string) => Promise<void>;
+  onSave: (amount: number, reason: string, paymentMethod?: "cash" | "card" | "transfer") => Promise<void>;
 }) {
   const [amount, setAmount] = useState(String(draft.initialAmount ?? 100));
   const [reason, setReason] = useState(draft.reason ?? (draft.mode === "charge" ? "Cargo a credito" : "Abono"));
+  const [paymentMethod, setPaymentMethod] = useState<"cash" | "card" | "transfer">(draft.paymentMethod ?? "cash");
   const [busy, setBusy] = useState(false);
   const isCharge = draft.mode === "charge";
   const available = Math.max(0, draft.customer.credit_limit - draft.customer.balance);
@@ -32,7 +34,7 @@ export function CustomerCreditModal({
     if (!Number.isFinite(amountValue) || amountValue <= 0 || !reason.trim()) return;
     setBusy(true);
     try {
-      await onSave(amountValue, reason.trim());
+      await onSave(amountValue, reason.trim(), isCharge ? undefined : paymentMethod);
     } finally {
       setBusy(false);
     }
@@ -64,6 +66,16 @@ export function CustomerCreditModal({
             Motivo
             <input value={reason} onChange={(event) => setReason(event.target.value)} />
           </label>
+          {!isCharge && (
+            <label>
+              Forma de pago
+              <select value={paymentMethod} onChange={(event) => setPaymentMethod(event.target.value as "cash" | "card" | "transfer")}>
+                <option value="cash">Efectivo</option>
+                <option value="card">Tarjeta</option>
+                <option value="transfer">Transferencia</option>
+              </select>
+            </label>
+          )}
           <div className="modal-actions">
             <button className="ghost-button" type="button" onClick={onClose} disabled={busy}>Cancelar</button>
             <button className="primary-button" type="submit" disabled={busy || !Number.isFinite(amountValue) || amountValue <= 0 || !reason.trim()}>{isCharge ? "Aplicar cargo" : "Aplicar abono"}</button>

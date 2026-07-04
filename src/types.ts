@@ -47,7 +47,7 @@ export type CartLine = {
 };
 
 export type Payment = {
-  method: "cash" | "card" | "transfer" | "voucher";
+  method: "cash" | "card" | "transfer" | "voucher" | "credit";
   amount: number;
   reference?: string;
 };
@@ -113,20 +113,29 @@ export type SaleListItem = {
 export type ShiftCutSnapshot = {
   shift_id: number;
   cash_session_id: number;
+  workstation_id?: string | null;
   status: string;
   opened_at: string;
   closed_at?: string | null;
+  duration_minutes?: number;
   opened_by_name?: string | null;
   closed_by_name?: string | null;
   total_tickets: number;
   canceled_tickets: number;
   gross_sales: number;
   net_sales: number;
+  gross_profit?: number;
   tax: number;
   discount: number;
   cash_paid: number;
   card_paid: number;
   transfer_paid: number;
+  credit_sales?: number;
+  cash_entries_total?: number;
+  cash_out_total?: number;
+  cash_refunds_total?: number;
+  credit_payments_total?: number;
+  counted_income_total?: number;
   average_ticket: number;
   opening_cash: number;
   expected_cash: number;
@@ -134,6 +143,14 @@ export type ShiftCutSnapshot = {
   counted_cash?: number | null;
   cash_difference?: number | null;
   difference_reason?: string | null;
+  payment_breakdown?: CutPaymentSummary[];
+  departments?: CutDepartmentSummary[];
+  cash_movements?: CutCashMovementSummary[];
+  refunds?: CutRefundSummary[];
+  credit_payments?: CutCreditPaymentSummary[];
+  taxes?: CutTaxSummary[];
+  top_customers_by_sales?: CutCustomerSummary[];
+  top_customers_by_profit?: CutCustomerSummary[];
 };
 
 export type DailyCutSummary = {
@@ -143,17 +160,89 @@ export type DailyCutSummary = {
   canceled_tickets: number;
   gross_sales: number;
   net_sales: number;
+  gross_profit?: number;
   tax: number;
   discount: number;
   cash_paid: number;
   card_paid: number;
   transfer_paid: number;
+  credit_sales?: number;
+  cash_entries_total?: number;
+  cash_out_total?: number;
+  cash_refunds_total?: number;
+  credit_payments_total?: number;
+  counted_income_total?: number;
   average_ticket: number;
   opening_cash: number;
   expected_cash: number;
   counted_cash: number;
   cash_difference: number;
+  payment_breakdown?: CutPaymentSummary[];
+  departments?: CutDepartmentSummary[];
+  refunds?: CutRefundSummary[];
+  credit_payments?: CutCreditPaymentSummary[];
+  taxes?: CutTaxSummary[];
+  top_customers_by_sales?: CutCustomerSummary[];
+  top_customers_by_profit?: CutCustomerSummary[];
   cuts: ShiftCutSnapshot[];
+};
+
+export type CutPaymentSummary = {
+  method: string;
+  label: string;
+  amount: number;
+  counts_as_cash: boolean;
+};
+
+export type CutDepartmentSummary = {
+  category: string;
+  quantity: number;
+  total_sales: number;
+  gross_profit: number;
+};
+
+export type CutCashMovementSummary = {
+  id: number;
+  movement_type: "in" | "out" | "drawer";
+  amount: number;
+  reason: string;
+  actor_name: string;
+  created_at: string;
+};
+
+export type CutRefundSummary = {
+  sale_id: number;
+  folio: string;
+  amount: number;
+  cash_amount: number;
+  reason: string;
+  created_at: string;
+};
+
+export type CutCreditPaymentSummary = {
+  id: number;
+  customer_name: string;
+  payment_method: string;
+  amount: number;
+  reason: string;
+  created_at: string;
+};
+
+export type CutTaxSummary = {
+  tax_name: string;
+  tax_type: string;
+  rate: number;
+  taxable_sales: number;
+  tax_collected: number;
+  gross_sales: number;
+};
+
+export type CutCustomerSummary = {
+  customer_id: number;
+  customer_name: string;
+  total_sales: number;
+  gross_profit: number;
+  ticket_count: number;
 };
 
 export type MonthlySalesReport = {
@@ -401,7 +490,8 @@ export type PermissionKey =
   | "customers"
   | "reports"
   | "purchases"
-  | "invoices";
+  | "invoices"
+  | "view_profit";
 
 export type UserSession = {
   id: number;
