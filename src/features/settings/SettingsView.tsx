@@ -416,8 +416,8 @@ export function SettingsView({
                 <label>
                   Ancho
                   <select value={ticketWidth} onChange={(event) => setTicketWidth(Number(event.target.value))}>
-                    <option value={32}>58 mm / 32 chars</option>
-                    <option value={40}>80 mm / 40 chars</option>
+                    <option value={32}>58 mm / 32 caracteres</option>
+                    <option value={40}>80 mm / 40 caracteres</option>
                     <option value={48}>80 mm amplio</option>
                   </select>
                 </label>
@@ -468,10 +468,10 @@ export function SettingsView({
                   </label>
                 </div>
               </div>
-              <aside className="ticket-preview-card" aria-label="Preview del ticket">
+              <aside className="ticket-preview-card" aria-label="Vista previa del ticket">
                 <div className="ticket-preview-title">
-                  <strong>Preview del ticket</strong>
-                  <span>{line.length} chars</span>
+                  <strong>Vista previa del ticket</strong>
+                  <span>{line.length} caracteres</span>
                 </div>
                 <textarea
                   className="ticket-preview"
@@ -484,7 +484,7 @@ export function SettingsView({
                   onBlur={() => {
                     if (ticketPreviewDirty) applyTicketPreviewEdits();
                   }}
-                  aria-label="Editar preview del ticket"
+                  aria-label="Editar vista previa del ticket"
                 />
                 <button className="ghost-button" type="button" onClick={testPrinter}>
                   Probar impresora
@@ -516,7 +516,7 @@ export function SettingsView({
                 </select>
               </label>
               <label>
-                Impuesto default
+                Impuesto predeterminado
                 <select value={taxDefaultRate} onChange={(event) => setTaxDefaultRate(Number(event.target.value))} disabled={!taxEnabled}>
                   <option value={0}>0%</option>
                   <option value={0.08}>8%</option>
@@ -527,7 +527,7 @@ export function SettingsView({
               <label>
                 Nuevos productos
                 <select value={taxAutoApply ? "true" : "false"} onChange={(event) => setTaxAutoApply(event.target.value === "true")} disabled={!taxEnabled}>
-                  <option value="true">Aplicar impuesto default</option>
+                  <option value="true">Aplicar impuesto predeterminado</option>
                   <option value="false">Asignar manualmente</option>
                 </select>
               </label>

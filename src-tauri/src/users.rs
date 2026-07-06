@@ -161,6 +161,12 @@ pub(crate) fn auth_login(state: State<'_, AppState>, input: LoginInput) -> Comma
         )
         .map_err(|error| error.to_string())?;
     }
+    conn.execute(
+        "INSERT INTO audit_log (actor_id, action, entity, entity_id, details, created_at)
+         VALUES (?1, 'login', 'user', ?1, ?2, ?3)",
+        params![id, name, now_iso()],
+    )
+    .map_err(|error| error.to_string())?;
     let permissions = load_user_permissions(&conn, id, &role)?;
     Ok(UserSession {
         id,
@@ -226,6 +232,12 @@ pub(crate) fn user_create(
     })?;
     let id = conn.last_insert_rowid();
     save_user_permissions(&conn, id, role, &input.permissions)?;
+    conn.execute(
+        "INSERT INTO audit_log (actor_id, action, entity, entity_id, details, created_at)
+         VALUES (?1, 'user_create', 'user', ?2, ?3, ?4)",
+        params![actor_id, id, format!("{name} · rol {role}"), now_iso()],
+    )
+    .map_err(|error| error.to_string())?;
     let mut user = conn
         .query_row(
             "SELECT id, name, role, active, created_at FROM users WHERE id = ?1",
@@ -288,6 +300,17 @@ pub(crate) fn user_update(
         return Err("Usuario no encontrado".into());
     }
     save_user_permissions(&conn, input.id, role, &input.permissions)?;
+    conn.execute(
+        "INSERT INTO audit_log (actor_id, action, entity, entity_id, details, created_at)
+         VALUES (?1, 'user_update', 'user', ?2, ?3, ?4)",
+        params![
+            actor_id,
+            input.id,
+            format!("{name} · rol {role}{}", if pin.is_some() { " · contraseña restablecida" } else { "" }),
+            now_iso()
+        ],
+    )
+    .map_err(|error| error.to_string())?;
     let mut user = conn
         .query_row(
             "SELECT id, name, role, active, created_at FROM users WHERE id = ?1",
@@ -303,14 +326,20 @@ pub(crate) fn user_update(
 pub(crate) fn user_delete(state: State<'_, AppState>, actor_id: i64, id: i64) -> CommandResult<()> {
     let conn = state.db.lock().map_err(|error| error.to_string())?;
     require_admin(&conn, actor_id)?;
-    let current_role: String = conn
-        .query_row("SELECT role FROM users WHERE id = ?1", params![id], |row| {
-            row.get(0)
+    let (current_role, name): (String, String) = conn
+        .query_row("SELECT role, name FROM users WHERE id = ?1", params![id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
         })
         .map_err(|_| "Usuario no encontrado".to_string())?;
     ensure_admin_remains(&conn, id, &current_role, false)?;
     conn.execute("UPDATE users SET active = 0 WHERE id = ?1", params![id])
         .map_err(|error| error.to_string())?;
+    conn.execute(
+        "INSERT INTO audit_log (actor_id, action, entity, entity_id, details, created_at)
+         VALUES (?1, 'user_delete', 'user', ?2, ?3, ?4)",
+        params![actor_id, id, format!("{name} · rol {current_role}"), now_iso()],
+    )
+    .map_err(|error| error.to_string())?;
     Ok(())
 }
 

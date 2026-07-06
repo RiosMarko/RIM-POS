@@ -12,6 +12,7 @@ import {
   ShoppingCart,
   TrendingDown,
   TrendingUp,
+  Users,
   WalletCards,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -81,6 +82,8 @@ function movementTone(movement: ReportMovement) {
   if (movement.kind === "cash") return movement.amount === 0 ? "neutral" : movement.amount > 0 ? "cash-in" : "expense";
   if (movement.kind === "cut") return "cut";
   if (movement.kind === "inventory") return "inventory";
+  if (movement.kind === "count") return movement.amount === 0 ? "neutral" : "danger";
+  if (movement.kind === "user") return "neutral";
   return "neutral";
 }
 
@@ -90,6 +93,8 @@ function movementLabel(kind: ReportMovement["kind"]) {
   if (kind === "cash") return "Caja";
   if (kind === "inventory") return "Inventario";
   if (kind === "credit") return "Credito";
+  if (kind === "count") return "Arqueo";
+  if (kind === "user") return "Usuarios";
   return "Corte";
 }
 
@@ -99,6 +104,8 @@ function movementIcon(kind: ReportMovement["kind"]): LucideIcon {
   if (kind === "cash") return Banknote;
   if (kind === "inventory") return Archive;
   if (kind === "credit") return WalletCards;
+  if (kind === "count") return Percent;
+  if (kind === "user") return Users;
   return CalendarDays;
 }
 
@@ -204,7 +211,7 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
 
   const normalizedFilterText = useMemo(() => filterText.trim().toLowerCase(), [filterText]);
   const periodMovements = useMemo(() => movements.filter((movement) => {
-    const day = movement.created_at.slice(0, 10);
+    const day = dateKey(new Date(movement.created_at));
     if (fromDate && day < fromDate) return false;
     if (toDate && day > toDate) return false;
     return true;
@@ -263,7 +270,7 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
     const explicitStart = parseDateKey(fromDate);
     const explicitEnd = parseDateKey(toDate);
     const saleDates = saleMovements
-      .map((movement) => parseDateKey(movement.created_at.slice(0, 10)))
+      .map((movement) => parseDateKey(dateKey(new Date(movement.created_at))))
       .filter((date): date is Date => Boolean(date))
       .sort((left, right) => left.getTime() - right.getTime());
     const end = explicitEnd ?? saleDates[saleDates.length - 1] ?? new Date();
@@ -288,7 +295,7 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
       };
     });
     saleMovements.forEach((movement) => {
-      const day = movement.created_at.slice(0, 10);
+      const day = dateKey(new Date(movement.created_at));
       const bucket = buckets.find((item) => day >= item.startKey && day <= item.endKey);
       if (bucket) {
         bucket.total += movement.amount;
@@ -417,6 +424,8 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
             <option value="inventory">Inventario</option>
             <option value="credit">Credito clientes</option>
             <option value="cut">Cortes</option>
+            <option value="count">Arqueos</option>
+            <option value="user">Usuarios</option>
           </select>
         </label>
         <label className="report-search">
@@ -644,7 +653,9 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
                       </small>
                     </div>
                     <span className="movement-kind">{movementLabel(movement.kind)}</span>
-                    <strong className={movement.amount < 0 ? "amount-out" : "amount-in"}>{money(movement.amount)}</strong>
+                    {movement.kind !== "inventory" && movement.kind !== "user" && (
+                      <strong className={movement.amount < 0 ? "amount-out" : "amount-in"}>{money(movement.amount)}</strong>
+                    )}
                   </div>
                 );
               })}

@@ -1,4 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
+import { save } from "@tauri-apps/plugin-dialog";
+import { localDateKey } from "./date";
 import type {
   ActiveSaleDraft,
   AppBootstrap,
@@ -27,8 +29,6 @@ import type {
   ProductInput,
   ProductSalesReport,
   ReportMovement,
-  PurchaseInput,
-  PurchaseReceipt,
   ReportSummary,
   SaleListItem,
   SaleReceipt,
@@ -223,8 +223,6 @@ let mockLastCutZ: ShiftCutSnapshot | null = null;
 const mockMonthlySeq = new Map<string, number>();
 let mockSuppliers: Supplier[] = [];
 let mockSupplierId = 1;
-let mockPurchases: PurchaseReceipt[] = [];
-let mockPurchaseId = 1;
 let mockInvoiceId = 1;
 let mockInvoices: InvoiceDraft[] = [];
 const mockSettings = new Map<string, string>();
@@ -563,47 +561,6 @@ export async function deleteSupplier(id: number): Promise<void> {
     return call<void>("supplier_delete", { actorId: requireActorId(), id });
   }
   mockSuppliers = mockSuppliers.filter((supplier) => supplier.id !== id);
-}
-
-export async function createPurchase(input: PurchaseInput): Promise<PurchaseReceipt> {
-  if (isTauri()) {
-    return call<PurchaseReceipt>("purchase_create", { actorId: requireActorId(), input });
-  }
-  const product = demoProducts.find((candidate) => candidate.id === input.product_id);
-  if (!product) throw new Error("Producto no disponible");
-  const supplier = mockSuppliers.find((candidate) => candidate.id === input.supplier_id);
-  const nextProduct = { ...product, stock: product.stock + input.quantity, cost: input.unit_cost };
-  demoProducts = demoProducts.map((candidate) => (candidate.id === product.id ? nextProduct : candidate));
-  mockInventoryMovements.unshift({
-    id: mockInventoryMovementId,
-    product_id: product.id,
-    product_name: product.name,
-    movement_type: "purchase",
-    quantity: input.quantity,
-    reason: input.note || "Compra",
-    reference_id: mockPurchaseId,
-    created_at: new Date().toISOString(),
-  });
-  mockInventoryMovementId += 1;
-  const receipt: PurchaseReceipt = {
-    id: mockPurchaseId,
-    supplier_name: supplier?.name ?? null,
-    product_name: product.name,
-    quantity: input.quantity,
-    unit_cost: input.unit_cost,
-    total: input.quantity * input.unit_cost,
-    created_at: new Date().toISOString(),
-  };
-  mockPurchaseId += 1;
-  mockPurchases = [receipt, ...mockPurchases];
-  return receipt;
-}
-
-export async function listPurchases(): Promise<PurchaseReceipt[]> {
-  if (isTauri()) {
-    return call<PurchaseReceipt[]>("purchase_list", { actorId: requireActorId() });
-  }
-  return mockPurchases;
 }
 
 export async function listTaxes(): Promise<TaxOption[]> {
@@ -1146,7 +1103,7 @@ export async function printShiftCut(shiftId: number): Promise<HardwareResult> {
   return { ok: true, message: `Demo navegador: corte ${shiftId}` };
 }
 
-function emptyDailyCutSummary(date = new Date().toISOString().slice(0, 10)): DailyCutSummary {
+function emptyDailyCutSummary(date = localDateKey()): DailyCutSummary {
   return {
     date,
     cut_count: 0,
@@ -1186,7 +1143,7 @@ export async function getDailyCutSummary(date?: string): Promise<DailyCutSummary
   if (isTauri()) {
     return call<DailyCutSummary>("daily_cut_summary", { actorId: requireActorId(), date: date ?? null });
   }
-  const targetDate = date ?? new Date().toISOString().slice(0, 10);
+  const targetDate = date ?? localDateKey();
   const cuts = (mockLastCutZ ? [mockLastCutZ] : [])
     .filter((cut) => cut.status === "closed" && (cut.closed_at ?? "").slice(0, 10) === targetDate);
   const summary = emptyDailyCutSummary(targetDate);
@@ -1227,7 +1184,20 @@ export async function printDailyCut(date?: string): Promise<HardwareResult> {
   if (isTauri()) {
     return call<HardwareResult>("print_daily_cut", { actorId: requireActorId(), date: date ?? null });
   }
-  return { ok: true, message: `Demo navegador: corte general ${date ?? new Date().toISOString().slice(0, 10)}` };
+  return { ok: true, message: `Demo navegador: corte general ${date ?? localDateKey()}` };
+}
+
+export async function exportBytesWithDialog(
+  defaultFileName: string,
+  bytes: Uint8Array,
+  filterName: string,
+  extensions: string[],
+): Promise<boolean> {
+  if (!isTauri()) return false;
+  const path = await save({ defaultPath: defaultFileName, filters: [{ name: filterName, extensions }] });
+  if (!path) return false;
+  await call<void>("export_file", { actorId: requireActorId(), path, contents: Array.from(bytes) });
+  return true;
 }
 
 export async function getMonthlySalesReport(month?: string): Promise<MonthlySalesReport[]> {
@@ -1392,22 +1362,6 @@ export async function listReportMovements(filters?: { fromDate?: string; toDate?
       actor_name: movement.actor_name,
       cash_session_id: movement.session_id,
       created_at: movement.created_at,
-    })),
-    ...mockPurchases.map((purchase) => ({
-      id: `purchase-${purchase.id}`,
-      kind: "purchase" as const,
-      title: `Compra ${purchase.id}`,
-      detail: `${purchase.product_name} · ${purchase.supplier_name ?? "Sin proveedor"}`,
-      amount: -purchase.total,
-      gross_profit: 0,
-      cash_paid: 0,
-      card_paid: 0,
-      transfer_paid: 0,
-      tax_total: 0,
-      card_terminal: null,
-      actor_name: null,
-      cash_session_id: null,
-      created_at: purchase.created_at,
     })),
     ...mockInventoryMovements.map((movement) => ({
       id: `inventory-${movement.id}`,

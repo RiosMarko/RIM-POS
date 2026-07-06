@@ -72,7 +72,7 @@ export function CustomersView({ showToast }: { showToast: (message: string) => v
         </div>
         <label>Nombre<input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></label>
         <label>Telefono<input value={form.phone} onChange={(event) => setForm({ ...form, phone: event.target.value })} /></label>
-        <label>Email<input value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} placeholder="opcional" /></label>
+        <label>Correo<input value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} placeholder="opcional" /></label>
         <label>Limite credito<input type="number" value={form.credit_limit === 0 ? "" : form.credit_limit} onFocus={selectNumericInput} onChange={(event) => setForm({ ...form, credit_limit: Number(event.target.value) })} /></label>
         <div className="form-button-row">
           {editing && <button className="ghost-button" type="button" onClick={resetForm}>Nuevo cliente</button>}

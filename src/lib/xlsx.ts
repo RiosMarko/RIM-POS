@@ -193,8 +193,8 @@ function sheetXml(rows: Array<Array<string | number>>) {
   return `${xmlHeader}<worksheet xmlns="${spreadsheetNs}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData>${body}</sheetData></worksheet>`;
 }
 
-function workbookXml() {
-  return `${xmlHeader}<workbook xmlns="${spreadsheetNs}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Catalogo" sheetId="1" r:id="rId1"/></sheets></workbook>`;
+function workbookXml(sheetName = "Catalogo") {
+  return `${xmlHeader}<workbook xmlns="${spreadsheetNs}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="${xmlEscape(sheetName)}" sheetId="1" r:id="rId1"/></sheets></workbook>`;
 }
 
 function workbookRelsXml() {
@@ -252,13 +252,116 @@ export function downloadXlsx(filename: string, rows: Array<Array<string | number
     "xl/_rels/workbook.xml.rels": strToU8(workbookRelsXml()),
     "xl/worksheets/sheet1.xml": strToU8(sheetXml(rows)),
   });
-  const blob = new Blob([zipped], {
-    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  });
+  downloadBytes(filename, zipped, XLSX_MIME);
+}
+
+export const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+export function downloadBytes(filename: string, bytes: Uint8Array, mime: string) {
+  const blob = new Blob([bytes as unknown as BlobPart], { type: mime });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
   link.download = filename;
   link.click();
   URL.revokeObjectURL(url);
+}
+
+export type XlsxCellStyle = "title" | "section" | "label" | "money" | "plain" | "totalLabel" | "totalMoney";
+export type XlsxCell = { value: string | number; style?: XlsxCellStyle };
+export type XlsxRow = XlsxCell[];
+
+export function cell(value: string | number, style?: XlsxCellStyle): XlsxCell {
+  return { value, style };
+}
+
+const styledCellXf: Record<XlsxCellStyle, number> = {
+  plain: 0,
+  title: 1,
+  section: 2,
+  money: 3,
+  label: 4,
+  totalLabel: 5,
+  totalMoney: 6,
+};
+
+function styledContentTypesXml() {
+  return `${xmlHeader}<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`;
+}
+
+function styledWorkbookRelsXml() {
+  return `${xmlHeader}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`;
+}
+
+function stylesXml() {
+  return `${xmlHeader}<styleSheet xmlns="${spreadsheetNs}">` +
+    `<numFmts count="1"><numFmt numFmtId="164" formatCode="&quot;$&quot;#,##0.00"/></numFmts>` +
+    `<fonts count="5">` +
+    `<font><sz val="11"/><name val="Calibri"/></font>` +
+    `<font><b/><sz val="13"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font>` +
+    `<font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font>` +
+    `<font><b/><sz val="11"/><name val="Calibri"/></font>` +
+    `<font><b/><sz val="18"/><color rgb="FF1F6F4A"/><name val="Calibri"/></font>` +
+    `</fonts>` +
+    `<fills count="4">` +
+    `<fill><patternFill patternType="none"/></fill>` +
+    `<fill><patternFill patternType="gray125"/></fill>` +
+    `<fill><patternFill patternType="solid"><fgColor rgb="FF1F6F4A"/><bgColor indexed="64"/></patternFill></fill>` +
+    `<fill><patternFill patternType="solid"><fgColor rgb="FF3D8C63"/><bgColor indexed="64"/></patternFill></fill>` +
+    `</fills>` +
+    `<borders count="2">` +
+    `<border><left/><right/><top/><bottom/><diagonal/></border>` +
+    `<border><left style="thin"><color rgb="FFE0E0E0"/></left><right style="thin"><color rgb="FFE0E0E0"/></right><top style="thin"><color rgb="FFE0E0E0"/></top><bottom style="thin"><color rgb="FFE0E0E0"/></bottom></border>` +
+    `</borders>` +
+    `<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>` +
+    `<cellXfs count="7">` +
+    `<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1"/>` +
+    `<xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/>` +
+    `<xf numFmtId="0" fontId="2" fillId="3" borderId="0" xfId="0" applyFont="1" applyFill="1"/>` +
+    `<xf numFmtId="164" fontId="0" fillId="0" borderId="1" xfId="0" applyNumFmt="1" applyBorder="1"/>` +
+    `<xf numFmtId="0" fontId="3" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1"/>` +
+    `<xf numFmtId="0" fontId="4" fillId="0" borderId="0" xfId="0" applyFont="1"/>` +
+    `<xf numFmtId="164" fontId="4" fillId="0" borderId="0" xfId="0" applyFont="1" applyNumFmt="1"/>` +
+    `</cellXfs>` +
+    `</styleSheet>`;
+}
+
+function styledSheetXml(rows: XlsxRow[], columnWidths: number[], dataBarRanges: string[]) {
+  const rowHeight = (row: XlsxRow) => {
+    if (row.some((item) => item.style === "title")) return ' ht="24" customHeight="1"';
+    if (row.some((item) => item.style === "totalMoney" || item.style === "totalLabel")) return ' ht="28" customHeight="1"';
+    if (row.some((item) => item.style === "section")) return ' ht="18" customHeight="1"';
+    return "";
+  };
+  const cols = `<cols>${columnWidths.map((width, index) => `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`).join("")}</cols>`;
+  const body = rows.map((row, rowIndex) => {
+    const cells = row.map((item, colIndex) => {
+      const ref = `${columnName(colIndex)}${rowIndex + 1}`;
+      const styleAttr = ` s="${styledCellXf[item.style ?? "plain"]}"`;
+      if (item.value === "") return `<c r="${ref}"${styleAttr}/>`;
+      if (typeof item.value === "number") return `<c r="${ref}"${styleAttr}><v>${item.value}</v></c>`;
+      return `<c r="${ref}"${styleAttr} t="inlineStr"><is><t>${xmlEscape(item.value)}</t></is></c>`;
+    }).join("");
+    return `<row r="${rowIndex + 1}"${rowHeight(row)}>${cells}</row>`;
+  }).join("");
+  const dataBars = dataBarRanges.map((range, index) => (
+    `<conditionalFormatting sqref="${range}"><cfRule type="dataBar" priority="${index + 1}"><dataBar><cfvo type="min"/><cfvo type="max"/><color rgb="FF3D8C63"/></dataBar></cfRule></conditionalFormatting>`
+  )).join("");
+  return `${xmlHeader}<worksheet xmlns="${spreadsheetNs}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">${cols}<sheetData>${body}</sheetData>${dataBars}</worksheet>`;
+}
+
+export function buildStyledXlsxBytes(
+  sheetName: string,
+  rows: XlsxRow[],
+  columnWidths: number[],
+  dataBarRanges: string[] = [],
+): Uint8Array {
+  return zipSync({
+    "[Content_Types].xml": strToU8(styledContentTypesXml()),
+    "_rels/.rels": strToU8(rootRelsXml()),
+    "xl/workbook.xml": strToU8(workbookXml(sheetName)),
+    "xl/_rels/workbook.xml.rels": strToU8(styledWorkbookRelsXml()),
+    "xl/styles.xml": strToU8(stylesXml()),
+    "xl/worksheets/sheet1.xml": strToU8(styledSheetXml(rows, columnWidths, dataBarRanges)),
+  });
 }

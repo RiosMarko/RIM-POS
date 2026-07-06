@@ -1,6 +1,6 @@
 [package]
 name = "pos-abarrotes"
-version = "0.1.13"
+version = "0.1.14"
 description = "Punto de venta local para abarrotes"
 authors = ["Marco Rios"]
 edition = "2021"
@@ -21,4 +21,5 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2.7.1"
 thiserror = "1"

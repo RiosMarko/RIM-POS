@@ -14,7 +14,7 @@ pub(crate) fn monthly_sales_report(
     require_permission(&conn, actor_id, "reports")?;
     let mut sql = String::from(
         "SELECT
-            strftime('%Y-%m', s.created_at) AS month,
+            strftime('%Y-%m', s.created_at, 'localtime') AS month,
             SUM(CASE WHEN s.status = 'paid' THEN 1 ELSE 0 END) AS total_tickets,
             COALESCE(SUM(CASE WHEN s.status = 'paid' THEN s.total ELSE 0 END), 0) AS total_amount,
             SUM(CASE WHEN s.status = 'canceled' THEN 1 ELSE 0 END) AS canceled_tickets
@@ -23,7 +23,7 @@ pub(crate) fn monthly_sales_report(
          WHERE sh.status = 'closed'",
     );
     if month.is_some() {
-        sql.push_str(" AND strftime('%Y-%m', s.created_at) = ?1");
+        sql.push_str(" AND strftime('%Y-%m', s.created_at, 'localtime') = ?1");
     }
     sql.push_str(" GROUP BY month ORDER BY month DESC");
     let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
@@ -61,7 +61,7 @@ pub(crate) fn report_summary(state: State<'_, AppState>, actor_id: i64) -> Comma
         .query_row(
             "SELECT COALESCE(SUM(total), 0), COUNT(*)
              FROM sales
-             WHERE date(created_at) = date('now') AND status = 'paid'",
+             WHERE date(created_at, 'localtime') = date('now', 'localtime') AND status = 'paid'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -72,7 +72,7 @@ pub(crate) fn report_summary(state: State<'_, AppState>, actor_id: i64) -> Comma
              FROM sale_items si
              JOIN sales s ON s.id = si.sale_id
              JOIN products p ON p.id = si.product_id
-             WHERE date(s.created_at) = date('now') AND s.status = 'paid'",
+             WHERE date(s.created_at, 'localtime') = date('now', 'localtime') AND s.status = 'paid'",
             [],
             |row| row.get(0),
         )
@@ -94,7 +94,7 @@ pub(crate) fn report_summary(state: State<'_, AppState>, actor_id: i64) -> Comma
                 COALESCE(SUM(CASE WHEN p.method = 'transfer' THEN p.amount ELSE 0 END), 0)
              FROM payments p
              JOIN sales s ON s.id = p.sale_id
-             WHERE date(s.created_at) = date('now') AND s.status = 'paid'",
+             WHERE date(s.created_at, 'localtime') = date('now', 'localtime') AND s.status = 'paid'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -148,8 +148,8 @@ pub(crate) fn report_product_sales(
              JOIN sales s ON s.id = si.sale_id
              JOIN products p ON p.id = si.product_id
              WHERE s.status = 'paid'
-               AND (?2 IS NULL OR date(s.created_at) >= date(?2))
-               AND (?3 IS NULL OR date(s.created_at) <= date(?3))
+               AND (?2 IS NULL OR date(s.created_at, 'localtime') >= date(?2))
+               AND (?3 IS NULL OR date(s.created_at, 'localtime') <= date(?3))
              GROUP BY p.id, p.name, p.category
              ORDER BY SUM(si.line_total) DESC
              LIMIT ?1",
@@ -193,8 +193,8 @@ pub(crate) fn report_unsold_products(
                  JOIN sales s ON s.id = si.sale_id
                  WHERE si.product_id = p.id
                    AND s.status = 'paid'
-                   AND (?1 IS NULL OR date(s.created_at) >= date(?1))
-                   AND (?2 IS NULL OR date(s.created_at) <= date(?2))
+                   AND (?1 IS NULL OR date(s.created_at, 'localtime') >= date(?1))
+                   AND (?2 IS NULL OR date(s.created_at, 'localtime') <= date(?2))
                )
              ORDER BY p.name
              LIMIT ?3",
@@ -241,8 +241,8 @@ pub(crate) fn report_tax_breakdown(
              FROM sale_items si
              JOIN sales s ON s.id = si.sale_id
              WHERE s.status = 'paid'
-               AND (?1 IS NULL OR date(s.created_at) >= date(?1))
-               AND (?2 IS NULL OR date(s.created_at) <= date(?2))
+               AND (?1 IS NULL OR date(s.created_at, 'localtime') >= date(?1))
+               AND (?2 IS NULL OR date(s.created_at, 'localtime') <= date(?2))
              GROUP BY si.tax_rate
              ORDER BY si.tax_rate DESC",
         )
@@ -279,11 +279,15 @@ pub(crate) fn report_movement_history(
                SELECT
                  'sale-' || s.id AS id,
                  'sale' AS kind,
-                 CASE WHEN s.status = 'paid' THEN 'Venta ' || s.folio ELSE 'Cancelacion ' || s.folio END AS title,
-                 'Efectivo ' || printf('%.2f', COALESCE(pay.cash_paid, 0)) ||
-                   ' · Tarjeta ' || printf('%.2f', COALESCE(pay.card_paid, 0)) ||
-                   COALESCE(' · Terminal ' || pay.card_terminal, '') ||
-                   ' · Transferencia ' || printf('%.2f', COALESCE(pay.transfer_paid, 0)) AS detail,
+                 CASE WHEN s.status = 'paid' THEN 'Venta ' || s.monthly_seq ELSE 'Cancelacion ' || s.monthly_seq END AS title,
+                 CASE WHEN s.status = 'paid' THEN
+                   'Efectivo ' || printf('%.2f', COALESCE(pay.cash_paid, 0)) ||
+                     ' · Tarjeta ' || printf('%.2f', COALESCE(pay.card_paid, 0)) ||
+                     COALESCE(' · Terminal ' || pay.card_terminal, '') ||
+                     ' · Transferencia ' || printf('%.2f', COALESCE(pay.transfer_paid, 0))
+                 ELSE
+                   'Motivo: ' || COALESCE(s.cancel_reason, 'Sin motivo') || COALESCE(' · Cancelo ' || cu.name, '')
+                 END AS detail,
                  CASE WHEN s.status = 'paid' THEN s.total ELSE -s.total END AS amount,
                  CASE WHEN s.status = 'paid' THEN COALESCE(profit.gross_profit, 0) ELSE -COALESCE(profit.gross_profit, 0) END AS gross_profit,
                  COALESCE(pay.cash_paid, 0) AS cash_paid,
@@ -296,6 +300,7 @@ pub(crate) fn report_movement_history(
                  s.created_at AS created_at
                FROM sales s
                JOIN users u ON u.id = s.cashier_id
+               LEFT JOIN users cu ON cu.id = s.canceled_by
                LEFT JOIN (
                  SELECT
                    sale_id,
@@ -365,8 +370,18 @@ pub(crate) fn report_movement_history(
                SELECT
                  'inventory-' || im.id,
                  'inventory',
-                 'Inventario ' || im.movement_type,
-                 p.name || ' · ' || im.reason || ' · ' || printf('%.3f', im.quantity),
+                 'Inventario ' || CASE im.movement_type
+                   WHEN 'sale' THEN 'venta'
+                   WHEN 'cancel' THEN 'cancelacion'
+                   WHEN 'edit' THEN 'edicion'
+                   WHEN 'adjustment' THEN 'ajuste'
+                   ELSE im.movement_type
+                 END,
+                 p.name || ' · ' || im.reason || ' · ' ||
+                   CASE WHEN im.quantity = CAST(im.quantity AS INTEGER)
+                     THEN printf('%+d', CAST(im.quantity AS INTEGER))
+                     ELSE printf('%+.3f', im.quantity)
+                   END,
                  0,
                  0,
                  0,
@@ -435,9 +450,55 @@ pub(crate) fn report_movement_history(
                FROM cash_sessions cs
                JOIN users u ON u.id = cs.opened_by
                WHERE cs.closed_at IS NOT NULL
+               UNION ALL
+               SELECT
+                 'count-' || cc.id,
+                 'count',
+                 CASE WHEN cc.count_type = 'close' THEN 'Arqueo cierre' ELSE 'Arqueo intermedio' END,
+                 'Esperado ' || printf('%.2f', cc.expected_cash) ||
+                   ' · Contado ' || printf('%.2f', cc.counted_cash) ||
+                   ' · Diferencia ' || printf('%.2f', cc.difference) ||
+                   COALESCE(' · Motivo: ' || cc.difference_reason, ''),
+                 cc.difference,
+                 0,
+                 0,
+                 0,
+                 0,
+                 0,
+                 NULL,
+                 u.name,
+                 cc.session_id,
+                 cc.created_at
+               FROM cash_counts cc
+               JOIN users u ON u.id = cc.actor_id
+               UNION ALL
+               SELECT
+                 'audit-' || al.id,
+                 'user',
+                 CASE al.action
+                   WHEN 'user_create' THEN 'Usuario creado'
+                   WHEN 'user_update' THEN 'Usuario editado'
+                   WHEN 'user_delete' THEN 'Usuario eliminado'
+                   WHEN 'login' THEN 'Inicio de sesion'
+                   ELSE al.action
+                 END,
+                 al.details,
+                 0,
+                 0,
+                 0,
+                 0,
+                 0,
+                 0,
+                 NULL,
+                 u.name,
+                 NULL,
+                 al.created_at
+               FROM audit_log al
+               JOIN users u ON u.id = al.actor_id
+               WHERE al.entity = 'user'
              )
-             WHERE (?2 IS NULL OR date(created_at) >= date(?2))
-               AND (?3 IS NULL OR date(created_at) <= date(?3))
+             WHERE (?2 IS NULL OR date(created_at, 'localtime') >= date(?2))
+               AND (?3 IS NULL OR date(created_at, 'localtime') <= date(?3))
              ORDER BY created_at DESC
              LIMIT ?1",
         )

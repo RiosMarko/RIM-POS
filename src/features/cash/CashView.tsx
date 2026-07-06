@@ -3,14 +3,15 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Metric } from "../../components/display/SummaryCards";
 import type { ConfirmDraft } from "../../components/modals/CommonModals";
 import { AdminGate } from "../auth/AuthScreens";
-import { downloadCsv, type CsvCell } from "../../lib/csv";
-import { formatDateMx, formatTimeMx } from "../../lib/date";
+import { formatDateMx, formatDateTimeMx, formatTimeMx, localDateKey } from "../../lib/date";
 import { money } from "../../lib/money";
+import { buildStyledXlsxBytes, cell, type XlsxRow } from "../../lib/xlsx";
 import {
   cancelSale,
   createCashCount,
   closeShiftCutZ,
   createCashMovement,
+  exportBytesWithDialog,
   getDailyCutSummary,
   listAuditLog,
   listCashCounts,
@@ -24,105 +25,164 @@ import {
 import type { AuditLogEntry, CashCount, CashMovement, CashSession, DailyCutSummary, SaleListItem, ShiftCutSnapshot, UserSession } from "../../types";
 import { CashDialog, SaleCancelModal } from "./CashModals";
 
-function shiftCutCsvRows(snapshot: ShiftCutSnapshot, canViewProfit: boolean): CsvCell[][] {
-  const rows: CsvCell[][] = [
-    ["Corte de turno", `#${snapshot.shift_id}`],
-    ["Cajero", snapshot.opened_by_name ?? ""],
-    ["Cerrado por", snapshot.closed_by_name ?? ""],
-    ["Caja", snapshot.workstation_id ?? ""],
-    ["Apertura", snapshot.opened_at],
-    ["Cierre", snapshot.closed_at ?? ""],
-    ["Duracion (min)", snapshot.duration_minutes ?? 0],
-    ["Tickets", snapshot.total_tickets],
-    ["Cancelados", snapshot.canceled_tickets],
-    ["Ventas netas", snapshot.net_sales],
-  ];
-  if (canViewProfit) rows.push(["Ganancia", snapshot.gross_profit ?? 0]);
-  rows.push(
-    ["Impuestos", snapshot.tax],
-    ["Descuentos", snapshot.discount],
-    ["Ventas a credito", snapshot.credit_sales ?? 0],
-    ["Fondo inicial", snapshot.opening_cash],
-    ["Entradas", snapshot.cash_entries_total ?? 0],
-    ["Salidas", snapshot.cash_out_total ?? 0],
-    ["Devoluciones efectivo", snapshot.cash_refunds_total ?? 0],
-    ["Abonos credito efectivo", snapshot.credit_payments_total ?? 0],
-    ["Esperado", snapshot.expected_cash],
-    ["Contado", snapshot.counted_cash ?? ""],
-    ["Diferencia", snapshot.cash_difference ?? ""],
-    [],
-    ["Forma de pago", "Monto"],
-  );
-  (snapshot.payment_breakdown ?? []).forEach((payment) => rows.push([payment.label, payment.amount]));
-  rows.push([], canViewProfit ? ["Departamento", "Cantidad", "Ventas", "Ganancia"] : ["Departamento", "Cantidad", "Ventas"]);
-  (snapshot.departments ?? []).forEach((department) => {
-    const row: CsvCell[] = [department.category, department.quantity, department.total_sales];
-    if (canViewProfit) row.push(department.gross_profit);
-    rows.push(row);
-  });
-  rows.push([], ["Movimientos de caja", "Monto", "Motivo", "Cajero", "Fecha"]);
-  (snapshot.cash_movements ?? []).forEach((movement) => rows.push([movement.movement_type, movement.amount, movement.reason, movement.actor_name, movement.created_at]));
-  rows.push([], ["Devoluciones", "Monto", "Efectivo", "Motivo", "Fecha"]);
-  (snapshot.refunds ?? []).forEach((refund) => rows.push([refund.folio, refund.amount, refund.cash_amount, refund.reason, refund.created_at]));
-  rows.push([], ["Abonos credito", "Forma de pago", "Monto", "Motivo", "Fecha"]);
-  (snapshot.credit_payments ?? []).forEach((payment) => rows.push([payment.customer_name, payment.payment_method, payment.amount, payment.reason, payment.created_at]));
-  rows.push([], ["Impuestos", "Tasa", "Ventas gravadas", "Cobrado"]);
-  (snapshot.taxes ?? []).forEach((tax) => rows.push([tax.tax_name, tax.rate, tax.taxable_sales, tax.tax_collected]));
-  rows.push([], ["Top clientes por venta", "Ventas", "Tickets"]);
-  (snapshot.top_customers_by_sales ?? []).forEach((customer) => rows.push([customer.customer_name, customer.total_sales, customer.ticket_count]));
-  if (canViewProfit) {
-    rows.push([], ["Top clientes por ganancia", "Ganancia"]);
-    (snapshot.top_customers_by_profit ?? []).forEach((customer) => rows.push([customer.customer_name, customer.gross_profit]));
-  }
-  return rows;
+const CUT_COLUMN_WIDTHS = [30, 18, 18, 22, 20, 34];
+
+function label(text: string, value: string | number): XlsxRow {
+  return [cell(text, "label"), cell(value)];
 }
 
-function dailyCutCsvRows(summary: DailyCutSummary, canViewProfit: boolean): CsvCell[][] {
-  const rows: CsvCell[][] = [
-    ["Corte general", summary.date],
-    ["Turnos cerrados", summary.cut_count],
-    ["Tickets", summary.total_tickets],
-    ["Cancelados", summary.canceled_tickets],
-    ["Ventas netas", summary.net_sales],
+function moneyRow(text: string, value: number): XlsxRow {
+  return [cell(text, "label"), cell(value, "money")];
+}
+
+function totalRow(text: string, value: number): XlsxRow {
+  return [cell(text, "totalLabel"), cell(value, "totalMoney")];
+}
+
+function section(...headers: string[]): XlsxRow {
+  return headers.map((text) => cell(text, "section"));
+}
+
+function banner(text: string): XlsxRow {
+  return [cell(text, "title"), cell("", "title"), cell("", "title"), cell("", "title"), cell("", "title")];
+}
+
+type CutSheet = { rows: XlsxRow[]; dataBarRanges: string[] };
+
+function trackDataBar(rows: XlsxRow[], dataBarRanges: string[], column: string, addRows: () => void) {
+  const start = rows.length + 1;
+  addRows();
+  const end = rows.length;
+  if (end >= start) dataBarRanges.push(`${column}${start}:${column}${end}`);
+}
+
+function shiftCutXlsxRows(snapshot: ShiftCutSnapshot, canViewProfit: boolean): CutSheet {
+  const rows: XlsxRow[] = [
+    banner(`Corte de turno #${snapshot.shift_id}`),
+    [], [],
+    label("Cajero", snapshot.opened_by_name ?? ""),
+    label("Cerrado por", snapshot.closed_by_name ?? ""),
+    label("Caja", snapshot.workstation_id ?? ""),
+    label("Apertura", formatDateTimeMx(snapshot.opened_at)),
+    label("Cierre", snapshot.closed_at ? formatDateTimeMx(snapshot.closed_at) : ""),
+    label("Duracion (min)", snapshot.duration_minutes ?? 0),
+    label("Tickets", snapshot.total_tickets),
+    label("Cancelados", snapshot.canceled_tickets),
+    totalRow("Ventas totales", snapshot.net_sales),
   ];
-  if (canViewProfit) rows.push(["Ganancia", summary.gross_profit ?? 0]);
+  if (canViewProfit) rows.push(moneyRow("Ganancia", snapshot.gross_profit ?? 0));
   rows.push(
-    ["Impuestos", summary.tax],
-    ["Descuentos", summary.discount],
-    ["Ventas a credito", summary.credit_sales ?? 0],
-    ["Fondo inicial", summary.opening_cash],
-    ["Entradas", summary.cash_entries_total ?? 0],
-    ["Salidas", summary.cash_out_total ?? 0],
-    ["Devoluciones efectivo", summary.cash_refunds_total ?? 0],
-    ["Abonos credito efectivo", summary.credit_payments_total ?? 0],
-    ["Esperado", summary.expected_cash],
-    ["Contado", summary.counted_cash],
-    ["Diferencia", summary.cash_difference],
-    [],
-    ["Forma de pago", "Monto"],
+    moneyRow("Impuestos", snapshot.tax),
+    moneyRow("Descuentos", snapshot.discount),
+    moneyRow("Ventas a credito", snapshot.credit_sales ?? 0),
+    moneyRow("Fondo inicial", snapshot.opening_cash),
+    moneyRow("Entradas", snapshot.cash_entries_total ?? 0),
+    moneyRow("Salidas", snapshot.cash_out_total ?? 0),
+    moneyRow("Devoluciones efectivo", snapshot.cash_refunds_total ?? 0),
+    moneyRow("Abonos credito efectivo", snapshot.credit_payments_total ?? 0),
+    moneyRow("Esperado", snapshot.expected_cash),
+    moneyRow("Contado", snapshot.counted_cash ?? 0),
+    moneyRow("Diferencia", snapshot.cash_difference ?? 0),
+    [], [],
+    section("Forma de pago", "Monto"),
   );
-  (summary.payment_breakdown ?? []).forEach((payment) => rows.push([payment.label, payment.amount]));
-  rows.push([], canViewProfit ? ["Departamento", "Cantidad", "Ventas", "Ganancia"] : ["Departamento", "Cantidad", "Ventas"]);
-  (summary.departments ?? []).forEach((department) => {
-    const row: CsvCell[] = [department.category, department.quantity, department.total_sales];
-    if (canViewProfit) row.push(department.gross_profit);
-    rows.push(row);
+  const dataBarRanges: string[] = [];
+  trackDataBar(rows, dataBarRanges, "B", () => {
+    (snapshot.payment_breakdown ?? []).forEach((payment) => rows.push(moneyRow(payment.label, payment.amount)));
   });
-  rows.push([], ["Devoluciones", "Monto", "Efectivo", "Motivo", "Fecha"]);
-  (summary.refunds ?? []).forEach((refund) => rows.push([refund.folio, refund.amount, refund.cash_amount, refund.reason, refund.created_at]));
-  rows.push([], ["Abonos credito", "Forma de pago", "Monto", "Motivo", "Fecha"]);
-  (summary.credit_payments ?? []).forEach((payment) => rows.push([payment.customer_name, payment.payment_method, payment.amount, payment.reason, payment.created_at]));
-  rows.push([], ["Impuestos", "Tasa", "Ventas gravadas", "Cobrado"]);
-  (summary.taxes ?? []).forEach((tax) => rows.push([tax.tax_name, tax.rate, tax.taxable_sales, tax.tax_collected]));
-  rows.push([], ["Top clientes por venta", "Ventas", "Tickets"]);
-  (summary.top_customers_by_sales ?? []).forEach((customer) => rows.push([customer.customer_name, customer.total_sales, customer.ticket_count]));
+  rows.push([], [], section(...(canViewProfit ? ["Departamento", "Cantidad", "Ventas", "Ganancia"] : ["Departamento", "Cantidad", "Ventas"])));
+  trackDataBar(rows, dataBarRanges, "C", () => {
+    (snapshot.departments ?? []).forEach((department) => {
+      const row: XlsxRow = [cell(department.category), cell(department.quantity), cell(department.total_sales, "money")];
+      if (canViewProfit) row.push(cell(department.gross_profit, "money"));
+      rows.push(row);
+    });
+  });
+  rows.push([], [], section("Movimientos de caja", "Monto", "Motivo", "Cajero", "Fecha"));
+  (snapshot.cash_movements ?? []).forEach((movement) => rows.push([
+    cell(movement.movement_type), cell(movement.amount, "money"), cell(movement.reason), cell(movement.actor_name ?? ""), cell(formatDateTimeMx(movement.created_at)),
+  ]));
+  rows.push([], [], section("Devoluciones", "Monto", "Efectivo", "Motivo", "Fecha", "Productos"));
+  (snapshot.refunds ?? []).forEach((refund) => rows.push([
+    cell(refund.folio), cell(refund.amount, "money"), cell(refund.cash_amount, "money"), cell(refund.reason), cell(formatDateTimeMx(refund.created_at)), cell(refund.products || "Sin detalle"),
+  ]));
+  rows.push([], [], section("Abonos credito", "Forma de pago", "Monto", "Motivo", "Fecha"));
+  (snapshot.credit_payments ?? []).forEach((payment) => rows.push([
+    cell(payment.customer_name), cell(payment.payment_method), cell(payment.amount, "money"), cell(payment.reason), cell(formatDateTimeMx(payment.created_at)),
+  ]));
+  rows.push([], [], section("Impuestos", "Tasa", "Ventas gravadas", "Cobrado"));
+  (snapshot.taxes ?? []).forEach((tax) => rows.push([cell(tax.tax_name), cell(tax.rate), cell(tax.taxable_sales, "money"), cell(tax.tax_collected, "money")]));
+  rows.push([], [], section("Top clientes por venta", "Ventas", "Tickets"));
+  trackDataBar(rows, dataBarRanges, "B", () => {
+    (snapshot.top_customers_by_sales ?? []).forEach((customer) => rows.push([cell(customer.customer_name), cell(customer.total_sales, "money"), cell(customer.ticket_count)]));
+  });
   if (canViewProfit) {
-    rows.push([], ["Top clientes por ganancia", "Ganancia"]);
-    (summary.top_customers_by_profit ?? []).forEach((customer) => rows.push([customer.customer_name, customer.gross_profit]));
+    rows.push([], [], section("Top clientes por ganancia", "Ganancia"));
+    (snapshot.top_customers_by_profit ?? []).forEach((customer) => rows.push([cell(customer.customer_name), cell(customer.gross_profit, "money")]));
   }
-  rows.push([], ["Turnos incluidos", "Cajero", "Ventas netas", "Diferencia"]);
-  summary.cuts.forEach((cut) => rows.push([`#${cut.shift_id}`, cut.closed_by_name ?? cut.opened_by_name ?? "", cut.net_sales, cut.cash_difference ?? ""]));
-  return rows;
+  return { rows, dataBarRanges };
+}
+
+function dailyCutXlsxRows(summary: DailyCutSummary, canViewProfit: boolean): CutSheet {
+  const rows: XlsxRow[] = [
+    banner(`Corte general ${formatDateMx(`${summary.date}T00:00:00`)}`),
+    [], [],
+    label("Turnos cerrados", summary.cut_count),
+    label("Tickets", summary.total_tickets),
+    label("Cancelados", summary.canceled_tickets),
+    totalRow("Ventas totales", summary.net_sales),
+  ];
+  if (canViewProfit) rows.push(moneyRow("Ganancia", summary.gross_profit ?? 0));
+  rows.push(
+    moneyRow("Impuestos", summary.tax),
+    moneyRow("Descuentos", summary.discount),
+    moneyRow("Ventas a credito", summary.credit_sales ?? 0),
+    moneyRow("Fondo inicial", summary.opening_cash),
+    moneyRow("Entradas", summary.cash_entries_total ?? 0),
+    moneyRow("Salidas", summary.cash_out_total ?? 0),
+    moneyRow("Devoluciones efectivo", summary.cash_refunds_total ?? 0),
+    moneyRow("Abonos credito efectivo", summary.credit_payments_total ?? 0),
+    moneyRow("Esperado", summary.expected_cash),
+    moneyRow("Contado", summary.counted_cash),
+    moneyRow("Diferencia", summary.cash_difference),
+    [], [],
+    section("Forma de pago", "Monto"),
+  );
+  const dataBarRanges: string[] = [];
+  trackDataBar(rows, dataBarRanges, "B", () => {
+    (summary.payment_breakdown ?? []).forEach((payment) => rows.push(moneyRow(payment.label, payment.amount)));
+  });
+  rows.push([], [], section(...(canViewProfit ? ["Departamento", "Cantidad", "Ventas", "Ganancia"] : ["Departamento", "Cantidad", "Ventas"])));
+  trackDataBar(rows, dataBarRanges, "C", () => {
+    (summary.departments ?? []).forEach((department) => {
+      const row: XlsxRow = [cell(department.category), cell(department.quantity), cell(department.total_sales, "money")];
+      if (canViewProfit) row.push(cell(department.gross_profit, "money"));
+      rows.push(row);
+    });
+  });
+  rows.push([], [], section("Devoluciones", "Monto", "Efectivo", "Motivo", "Fecha", "Productos"));
+  (summary.refunds ?? []).forEach((refund) => rows.push([
+    cell(refund.folio), cell(refund.amount, "money"), cell(refund.cash_amount, "money"), cell(refund.reason), cell(formatDateTimeMx(refund.created_at)), cell(refund.products || "Sin detalle"),
+  ]));
+  rows.push([], [], section("Abonos credito", "Forma de pago", "Monto", "Motivo", "Fecha"));
+  (summary.credit_payments ?? []).forEach((payment) => rows.push([
+    cell(payment.customer_name), cell(payment.payment_method), cell(payment.amount, "money"), cell(payment.reason), cell(formatDateTimeMx(payment.created_at)),
+  ]));
+  rows.push([], [], section("Impuestos", "Tasa", "Ventas gravadas", "Cobrado"));
+  (summary.taxes ?? []).forEach((tax) => rows.push([cell(tax.tax_name), cell(tax.rate), cell(tax.taxable_sales, "money"), cell(tax.tax_collected, "money")]));
+  rows.push([], [], section("Top clientes por venta", "Ventas", "Tickets"));
+  trackDataBar(rows, dataBarRanges, "B", () => {
+    (summary.top_customers_by_sales ?? []).forEach((customer) => rows.push([cell(customer.customer_name), cell(customer.total_sales, "money"), cell(customer.ticket_count)]));
+  });
+  if (canViewProfit) {
+    rows.push([], [], section("Top clientes por ganancia", "Ganancia"));
+    (summary.top_customers_by_profit ?? []).forEach((customer) => rows.push([cell(customer.customer_name), cell(customer.gross_profit, "money")]));
+  }
+  rows.push([], [], section("Turnos incluidos", "Cajero", "Ventas netas", "Diferencia"));
+  summary.cuts.forEach((cut) => rows.push([
+    cell(`#${cut.shift_id}`), cell(cut.closed_by_name ?? cut.opened_by_name ?? ""), cell(cut.net_sales, "money"), cell(cut.cash_difference ?? 0, "money"),
+  ]));
+  return { rows, dataBarRanges };
 }
 
 export function CashView({
@@ -152,7 +212,7 @@ export function CashView({
   const [cashDialog, setCashDialog] = useState<"open" | "in" | "out" | "audit" | "close" | null>(null);
   const [cutSnapshot, setCutSnapshot] = useState<ShiftCutSnapshot | null>(null);
   const [dailyCut, setDailyCut] = useState<DailyCutSummary | null>(null);
-  const selectedDate = new Date().toISOString().slice(0, 10);
+  const selectedDate = localDateKey();
   const [cancelDraft, setCancelDraft] = useState<SaleListItem | null>(null);
   const [cancelAdminDraft, setCancelAdminDraft] = useState<{ sale: SaleListItem; reason: string } | null>(null);
   const paidSales = useMemo(() => sales.filter((sale) => sale.status === "paid"), [sales]);
@@ -292,6 +352,31 @@ export function CashView({
     }
   };
 
+  const exportDailyCut = async () => {
+    if (!dailyCut) return;
+    try {
+      const { rows, dataBarRanges } = dailyCutXlsxRows(dailyCut, canViewProfit);
+      const bytes = buildStyledXlsxBytes("Corte", rows, CUT_COLUMN_WIDTHS, dataBarRanges);
+      const saved = await exportBytesWithDialog(`Corte ${dailyCut.date}.xlsx`, bytes, "Excel", ["xlsx"]);
+      if (saved) showToast("Corte exportado");
+    } catch (error) {
+      showToast(String(error));
+    }
+  };
+
+  const exportShiftCut = async () => {
+    if (!cutSnapshot) return;
+    try {
+      const { rows, dataBarRanges } = shiftCutXlsxRows(cutSnapshot, canViewProfit);
+      const bytes = buildStyledXlsxBytes("Corte", rows, CUT_COLUMN_WIDTHS, dataBarRanges);
+      const dateLabel = localDateKey(cutSnapshot.closed_at ?? cutSnapshot.opened_at);
+      const saved = await exportBytesWithDialog(`Corte ${dateLabel}.xlsx`, bytes, "Excel", ["xlsx"]);
+      if (saved) showToast("Corte exportado");
+    } catch (error) {
+      showToast(String(error));
+    }
+  };
+
   return (
     <section className="admin-panel compact">
       <div className="metric-grid">
@@ -353,7 +438,7 @@ export function CashView({
                 className="ghost-button"
                 type="button"
                 disabled={dailyCut.cut_count === 0}
-                onClick={() => downloadCsv(`corte-general-${dailyCut.date}.csv`, dailyCutCsvRows(dailyCut, canViewProfit))}
+                onClick={() => exportDailyCut()}
               >
                 <Download size={16} />
                 Exportar
@@ -440,6 +525,21 @@ export function CashView({
               <div className="cut-line"><span>Devoluciones</span><strong>{(dailyCut.refunds ?? []).length}</strong></div>
               <div className={`cut-line ${dailyDifferenceClass}`}><span>Diferencia</span><strong>{money(dailyCut.cash_difference)}</strong></div>
             </div>
+            <div className="cut-detail-section daily-cut-list">
+              <h3>Devoluciones</h3>
+              {(dailyCut.refunds ?? []).length === 0 ? (
+                <span className="muted-note">Sin devoluciones</span>
+              ) : (dailyCut.refunds ?? []).map((refund) => (
+                <div className="cut-line" key={refund.sale_id}>
+                  <span>
+                    {refund.folio} · {formatTimeMx(refund.created_at)}
+                    <br />
+                    <small className="muted-note">{refund.products || "Sin detalle"}</small>
+                  </span>
+                  <strong>-{money(refund.cash_amount)}</strong>
+                </div>
+              ))}
+            </div>
             <div className="cut-detail-section">
               <h3>Impuestos</h3>
               {(dailyCut.taxes ?? []).length === 0 ? (
@@ -497,7 +597,7 @@ export function CashView({
               <button
                 className="ghost-button"
                 type="button"
-                onClick={() => downloadCsv(`corte-turno-${cutSnapshot.shift_id}.csv`, shiftCutCsvRows(cutSnapshot, canViewProfit))}
+                onClick={() => exportShiftCut()}
               >
                 <Download size={16} />
                 Exportar
@@ -584,6 +684,21 @@ export function CashView({
               <div className="cut-line"><span>Cancelados</span><strong>{cutSnapshot.canceled_tickets}</strong></div>
               <div className="cut-line"><span>Devoluciones</span><strong>{(cutSnapshot.refunds ?? []).length}</strong></div>
               <div className={`cut-line ${cutDifferenceClass}`}><span>Diferencia</span><strong>{money(cutDifference)}</strong></div>
+            </div>
+            <div className="cut-detail-section">
+              <h3>Devoluciones</h3>
+              {(cutSnapshot.refunds ?? []).length === 0 ? (
+                <span className="muted-note">Sin devoluciones</span>
+              ) : (cutSnapshot.refunds ?? []).map((refund) => (
+                <div className="cut-line" key={refund.sale_id}>
+                  <span>
+                    {refund.folio} · {formatTimeMx(refund.created_at)}
+                    <br />
+                    <small className="muted-note">{refund.products || "Sin detalle"}</small>
+                  </span>
+                  <strong>-{money(refund.cash_amount)}</strong>
+                </div>
+              ))}
             </div>
             <div className="cut-detail-section">
               <h3>Impuestos</h3>

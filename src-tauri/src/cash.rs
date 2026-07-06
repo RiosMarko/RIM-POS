@@ -8,7 +8,7 @@ use crate::core::{average_ticket, now_iso, period_key, round_money};
 use crate::hardware::{run_print_file, temp_hardware_file};
 use crate::models::*;
 use crate::validation::validate_positive;
-use chrono::Utc;
+use chrono::Local;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::fs;
@@ -592,14 +592,14 @@ pub(crate) fn daily_cut_summary_with_conn(
 ) -> CommandResult<DailyCutSummary> {
     let date = date
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| Utc::now().format("%Y-%m-%d").to_string());
+        .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
     let mut stmt = conn
         .prepare(
             "SELECT id
              FROM shifts
              WHERE status = 'closed'
                AND closed_at IS NOT NULL
-               AND date(closed_at) = date(?1)
+               AND date(closed_at, 'localtime') = date(?1)
              ORDER BY closed_at, id",
         )
         .map_err(|error| error.to_string())?;
@@ -1162,7 +1162,12 @@ pub(crate) fn calculate_shift_cut(conn: &Connection, shift_id: i64) -> CommandRe
             "SELECT s.id, s.folio, s.total, s.change_due,
                     COALESCE((SELECT SUM(amount) FROM payments WHERE sale_id = s.id AND method = 'cash'), 0),
                     COALESCE(s.cancel_reason, s.notes, 'Cancelacion'),
-                    COALESCE(s.canceled_at, s.created_at)
+                    COALESCE(s.canceled_at, s.created_at),
+                    COALESCE((
+                      SELECT GROUP_CONCAT(p.name || ' x' || printf('%g', si.quantity), ', ')
+                      FROM sale_items si JOIN products p ON p.id = si.product_id
+                      WHERE si.sale_id = s.id
+                    ), '')
              FROM sales s
              WHERE s.shift_id = ?1 AND s.status = 'canceled'
              ORDER BY COALESCE(s.canceled_at, s.created_at) DESC, s.id DESC",
@@ -1178,6 +1183,7 @@ pub(crate) fn calculate_shift_cut(conn: &Connection, shift_id: i64) -> CommandRe
                 cash_amount: round_money(cash_amount),
                 reason: row.get(5)?,
                 created_at: row.get(6)?,
+                products: row.get(7)?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -1441,3 +1447,4 @@ pub(crate) fn calculate_shift_cut(conn: &Connection, shift_id: i64) -> CommandRe
         top_customers_by_profit,
     })
 }
+

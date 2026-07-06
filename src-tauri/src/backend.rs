@@ -648,6 +648,14 @@ fn backup_export_desktop(state: State<'_, AppState>, actor_id: i64) -> CommandRe
     })
 }
 
+#[tauri::command]
+fn export_file(state: State<'_, AppState>, actor_id: i64, path: String, contents: Vec<u8>) -> CommandResult<()> {
+    let conn = state.db.lock().map_err(|error| error.to_string())?;
+    require_active_user(&conn, actor_id)?;
+    fs::write(&path, contents).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 fn backup_dir_for(db_path: &PathBuf) -> CommandResult<PathBuf> {
     db_path
         .parent()
@@ -1577,6 +1585,7 @@ mod tests {
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let (conn, db_path) = init_db(&app.handle())
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
@@ -1608,8 +1617,6 @@ pub fn run() {
             crate::purchases::supplier_list,
             crate::purchases::supplier_upsert,
             crate::purchases::supplier_delete,
-            crate::purchases::purchase_create,
-            crate::purchases::purchase_list,
             crate::invoices::tax_list,
             crate::invoices::invoice_prepare,
             crate::invoices::invoice_list,
@@ -1655,6 +1662,7 @@ pub fn run() {
             settings_set_many,
             backup_create,
             backup_export_desktop,
+            export_file,
             backup_list,
             backup_restore,
             backup_auto_if_due

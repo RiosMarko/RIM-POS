@@ -24,7 +24,9 @@ export function WindowTitlebar({
     }).then((unlisten) => {
       cleanup = unlisten;
     }).catch(() => undefined);
-    return () => cleanup?.();
+    return () => {
+      if (cleanup) Promise.resolve(cleanup()).catch(() => undefined);
+    };
   }, []);
 
   const minimizeWindow = () => {

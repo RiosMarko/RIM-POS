@@ -3,7 +3,7 @@ import { KeyboardEvent as ReactKeyboardEvent, useCallback, useEffect, useMemo, u
 import { Metric } from "../../components/display/SummaryCards";
 import { downloadCsv } from "../../lib/csv";
 import { money, roundMoney } from "../../lib/money";
-import { adjustInventory, listInventoryMovements } from "../../lib/posApi";
+import { adjustInventory, listInventoryMovements, searchProducts } from "../../lib/posApi";
 import type { ProductSearchOptions } from "../../lib/posApi";
 import type { InventoryMovement, Product } from "../../types";
 import { InventoryAdjustmentModal } from "./InventoryModals";
@@ -94,21 +94,33 @@ export function InventoryView({
     openAdjustment(targetProduct);
   };
 
+  const inventoryCsvRows = (list: Product[]) => [
+    ["producto", "codigo", "departamento", "existencia", "unidad", "costo", "valor_costo", "ultimo_movimiento"],
+    ...list.map((product) => [
+      product.name,
+      product.barcode,
+      product.category,
+      product.stock,
+      product.unit,
+      product.cost,
+      roundMoney(product.stock * product.cost),
+      movementLabel(latestMovementByProduct.get(product.id)),
+    ]),
+  ];
+
   const exportInventory = () => {
-    downloadCsv(`inventario-rim-pos-${new Date().toISOString().slice(0, 10)}.csv`, [
-      ["producto", "codigo", "departamento", "existencia", "unidad", "costo", "valor_costo", "ultimo_movimiento"],
-      ...visibleProducts.map((product) => [
-        product.name,
-        product.barcode,
-        product.category,
-        product.stock,
-        product.unit,
-        product.cost,
-        roundMoney(product.stock * product.cost),
-        movementLabel(latestMovementByProduct.get(product.id)),
-      ]),
-    ]);
+    downloadCsv(`inventario-rim-pos-${new Date().toISOString().slice(0, 10)}.csv`, inventoryCsvRows(visibleProducts));
     showToast("Inventario exportado");
+  };
+
+  const exportFullInventory = async () => {
+    try {
+      const all = await searchProducts("", { limit: 50000, offset: 0 });
+      downloadCsv(`inventario-completo-rim-pos-${new Date().toISOString().slice(0, 10)}.csv`, inventoryCsvRows(all));
+      showToast(`Inventario completo exportado: ${all.length} productos`);
+    } catch (error) {
+      showToast(String(error));
+    }
   };
 
   return (
@@ -120,6 +132,7 @@ export function InventoryView({
         </div>
         <div className="toolbar-actions">
           <button className="ghost-button" type="button" onClick={exportInventory}>Exportar reporte</button>
+          <button className="ghost-button" type="button" onClick={exportFullInventory}>Exportar Inventario</button>
         </div>
       </div>
       <div className="inventory-summary">

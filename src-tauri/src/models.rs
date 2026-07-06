@@ -558,6 +558,7 @@ pub(crate) struct CutRefundSummary {
     pub(crate) cash_amount: f64,
     pub(crate) reason: String,
     pub(crate) created_at: String,
+    pub(crate) products: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -616,27 +617,6 @@ pub(crate) struct SupplierInput {
     pub(crate) name: String,
     pub(crate) phone: Option<String>,
     pub(crate) contact: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct PurchaseInput {
-    pub(crate) supplier_id: Option<i64>,
-    pub(crate) product_id: i64,
-    pub(crate) quantity: f64,
-    pub(crate) unit_cost: f64,
-    pub(crate) user_id: i64,
-    pub(crate) note: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct PurchaseReceipt {
-    pub(crate) id: i64,
-    pub(crate) supplier_name: Option<String>,
-    pub(crate) product_name: String,
-    pub(crate) quantity: f64,
-    pub(crate) unit_cost: f64,
-    pub(crate) total: f64,
-    pub(crate) created_at: String,
 }
 
 #[derive(Debug, Serialize)]

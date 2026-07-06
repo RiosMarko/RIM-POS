@@ -1,7 +1,7 @@
 import { Trash2 } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import type { ConfirmDraft } from "../../components/modals/CommonModals";
-import { loadShoppingList, saveShoppingList, type ShoppingListItem } from "../../lib/shoppingList";
+import { loadShoppingList, nextShoppingListId, saveShoppingList, type ShoppingListItem } from "../../lib/shoppingList";
 import { deleteSupplier, listSuppliers, upsertSupplier } from "../../lib/posApi";
 import type { Supplier } from "../../types";
 
@@ -69,7 +69,7 @@ export function PurchasesView({
   const addShoppingItem = () => {
     const text = shoppingDraft.trim();
     if (!text) return;
-    setShoppingList(saveShoppingList([...shoppingList, { id: Date.now(), text }]));
+    setShoppingList(saveShoppingList([...shoppingList, { id: nextShoppingListId(shoppingList), text }]));
     setShoppingDraft("");
   };
 

@@ -529,14 +529,15 @@ pub(crate) fn product_upsert(
     validate_non_negative(input.cost, "Importe o existencia invalida")?;
     validate_non_negative(input.stock, "Importe o existencia invalida")?;
     validate_non_negative(input.min_stock, "Importe o existencia invalida")?;
-    let conn = state.db.lock().map_err(|error| error.to_string())?;
+    let mut conn = state.db.lock().map_err(|error| error.to_string())?;
     require_permission(&conn, actor_id, "products")?;
     let now = now_iso();
     let active = if input.active { 1 } else { 0 };
-    let tax_rate = tax_rate_for_ids(&conn, &input.tax_ids, input.tax_rate)?;
+    let tx = conn.transaction().map_err(|error| error.to_string())?;
+    let tax_rate = tax_rate_for_ids(&tx, &input.tax_ids, input.tax_rate)?;
     let id = match input.id {
         Some(id) => {
-            let before: Option<(f64, f64)> = conn
+            let before: Option<(f64, f64)> = tx
                 .query_row(
                     "SELECT price, stock FROM products WHERE id = ?1",
                     params![id],
@@ -544,7 +545,7 @@ pub(crate) fn product_upsert(
                 )
                 .optional()
                 .map_err(|error| error.to_string())?;
-            conn.execute(
+            tx.execute(
                 "UPDATE products
                  SET sku = ?1, barcode = ?2, name = ?3, category = ?4, unit = ?5, price = ?6,
                      wholesale_price = ?7, cost = ?8, stock = ?9, min_stock = ?10, tax_rate = ?11,
@@ -577,7 +578,7 @@ pub(crate) fn product_upsert(
                 let stock_delta = input.stock - old_stock;
                 if stock_delta.abs() > 0.0001 {
                     details.push(format!("stock {:.3} -> {:.3}", old_stock, input.stock));
-                    conn.execute(
+                    tx.execute(
                         "INSERT INTO inventory_movements (product_id, movement_type, quantity, reason, reference_id, actor_id, created_at)
                          VALUES (?1, 'edit', ?2, 'Edicion de producto', NULL, ?3, ?4)",
                         params![id, stock_delta, actor_id, now],
@@ -585,7 +586,7 @@ pub(crate) fn product_upsert(
                     .map_err(|error| error.to_string())?;
                 }
                 if !details.is_empty() {
-                    conn.execute(
+                    tx.execute(
                         "INSERT INTO audit_log (actor_id, action, entity, entity_id, details, created_at)
                          VALUES (?1, 'product_update', 'product', ?2, ?3, ?4)",
                         params![actor_id, id, details.join(" · "), now],
@@ -596,7 +597,7 @@ pub(crate) fn product_upsert(
             id
         }
         None => {
-            conn.execute(
+            tx.execute(
                 "INSERT INTO products
                  (sku, barcode, name, category, unit, price, wholesale_price, cost, stock, min_stock, tax_rate, active, search_text, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)",
@@ -618,8 +619,8 @@ pub(crate) fn product_upsert(
                 ],
             )
             .map_err(|error| error.to_string())?;
-            let id = conn.last_insert_rowid();
-            conn.execute(
+            let id = tx.last_insert_rowid();
+            tx.execute(
                 "INSERT INTO audit_log (actor_id, action, entity, entity_id, details, created_at)
                  VALUES (?1, 'product_create', 'product', ?2, ?3, ?4)",
                 params![actor_id, id, format!("{name} · precio {:.2} · stock {:.3}", input.price, input.stock), now],
@@ -628,7 +629,8 @@ pub(crate) fn product_upsert(
             id
         }
     };
-    save_product_taxes(&conn, id, &input.tax_ids)?;
+    save_product_taxes(&tx, id, &input.tax_ids)?;
+    tx.commit().map_err(|error| error.to_string())?;
     get_product(&conn, id)
 }
 

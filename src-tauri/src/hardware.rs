@@ -6,7 +6,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -50,6 +50,9 @@ fn configure_command(command: &mut Command) {
 fn command_output(program: &str, args: &[&str], timeout_ms: u64) -> CommandResult<Output> {
     let mut command = Command::new(program);
     command.args(args);
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
     configure_command(&mut command);
     let mut child = command
         .spawn()

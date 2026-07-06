@@ -93,7 +93,7 @@ export function useWindowMode(session: UserSession | null) {
       })
       .then((unlisten) => {
         if (disposed) {
-          unlisten();
+          Promise.resolve(unlisten()).catch(logWindowError);
           return;
         }
         cleanup = unlisten;
@@ -102,7 +102,7 @@ export function useWindowMode(session: UserSession | null) {
     return () => {
       disposed = true;
       window.clearTimeout(resizeTimer);
-      cleanup?.();
+      if (cleanup) Promise.resolve(cleanup()).catch(logWindowError);
     };
   }, [logWindowError, session]);
 

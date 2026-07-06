@@ -620,7 +620,7 @@ export function ProductsView({
           <input type="number" step="0.01" value={form.cost === 0 ? "" : form.cost} onFocus={selectNumericInput} onChange={(event) => setForm({ ...form, cost: Number(event.target.value) })} />
         </label>
         <label>
-          Stock
+          Existencia
           <input type="number" step="1" value={form.stock === 0 ? "" : form.stock} onFocus={selectNumericInput} onChange={(event) => setForm({ ...form, stock: Number(event.target.value) })} />
         </label>
         <div className="tax-picker" role="group" aria-label="Impuestos incluidos">

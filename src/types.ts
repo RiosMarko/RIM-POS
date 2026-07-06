@@ -217,6 +217,7 @@ export type CutRefundSummary = {
   cash_amount: number;
   reason: string;
   created_at: string;
+  products: string;
 };
 
 export type CutCreditPaymentSummary = {
@@ -370,7 +371,7 @@ export type TaxBreakdown = {
 
 export type ReportMovement = {
   id: string;
-  kind: "sale" | "purchase" | "cash" | "inventory" | "credit" | "cut";
+  kind: "sale" | "purchase" | "cash" | "inventory" | "credit" | "cut" | "count" | "user";
   title: string;
   detail: string;
   amount: number;
@@ -440,25 +441,6 @@ export type SupplierInput = {
   name: string;
   phone?: string | null;
   contact?: string | null;
-};
-
-export type PurchaseInput = {
-  supplier_id?: number | null;
-  product_id: number;
-  quantity: number;
-  unit_cost: number;
-  user_id: number;
-  note?: string | null;
-};
-
-export type PurchaseReceipt = {
-  id: number;
-  supplier_name?: string | null;
-  product_name: string;
-  quantity: number;
-  unit_cost: number;
-  total: number;
-  created_at: string;
 };
 
 export type TaxOption = {

@@ -96,7 +96,7 @@ export function InvoicesView({ showToast }: { showToast: (message: string) => vo
           <label>RFC<input value={fiscalForm.rfc} onChange={(event) => setFiscalForm({ ...fiscalForm, rfc: event.target.value.toUpperCase() })} /></label>
           <label className="field-span-2">Regimen fiscal<input value={fiscalForm.fiscal_regime} onChange={(event) => setFiscalForm({ ...fiscalForm, fiscal_regime: event.target.value })} /></label>
           <label>Codigo postal<input value={fiscalForm.fiscal_postal_code} onChange={(event) => setFiscalForm({ ...fiscalForm, fiscal_postal_code: event.target.value })} /></label>
-          <label>Uso CFDI default<input value={fiscalForm.default_cfdi_use} onChange={(event) => setFiscalForm({ ...fiscalForm, default_cfdi_use: event.target.value.toUpperCase() })} /></label>
+          <label>Uso CFDI predeterminado<input value={fiscalForm.default_cfdi_use} onChange={(event) => setFiscalForm({ ...fiscalForm, default_cfdi_use: event.target.value.toUpperCase() })} /></label>
           <label>Serie<input value={fiscalForm.invoice_series} onChange={(event) => setFiscalForm({ ...fiscalForm, invoice_series: event.target.value.toUpperCase() })} /></label>
           <button className="primary-button form-submit" type="submit">Guardar datos fiscales</button>
         </form>
