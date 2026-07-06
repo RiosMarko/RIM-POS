@@ -374,11 +374,12 @@ pub(crate) fn report_movement_history(
                  0,
                  0,
                  NULL,
-                 NULL,
+                 u.name,
                  NULL,
                  im.created_at
                FROM inventory_movements im
                JOIN products p ON p.id = im.product_id
+               LEFT JOIN users u ON u.id = im.actor_id
                UNION ALL
                SELECT
                  'credit-' || ccm.id,

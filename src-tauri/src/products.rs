@@ -574,8 +574,15 @@ pub(crate) fn product_upsert(
                 if (old_price - input.price).abs() > 0.0001 {
                     details.push(format!("precio {:.2} -> {:.2}", old_price, input.price));
                 }
-                if (old_stock - input.stock).abs() > 0.0001 {
+                let stock_delta = input.stock - old_stock;
+                if stock_delta.abs() > 0.0001 {
                     details.push(format!("stock {:.3} -> {:.3}", old_stock, input.stock));
+                    conn.execute(
+                        "INSERT INTO inventory_movements (product_id, movement_type, quantity, reason, reference_id, actor_id, created_at)
+                         VALUES (?1, 'edit', ?2, 'Edicion de producto', NULL, ?3, ?4)",
+                        params![id, stock_delta, actor_id, now],
+                    )
+                    .map_err(|error| error.to_string())?;
                 }
                 if !details.is_empty() {
                     conn.execute(
@@ -735,9 +742,9 @@ pub(crate) fn inventory_adjust(
     )
     .map_err(|error| error.to_string())?;
     tx.execute(
-        "INSERT INTO inventory_movements (product_id, movement_type, quantity, reason, reference_id, created_at)
-         VALUES (?1, 'adjustment', ?2, ?3, NULL, ?4)",
-        params![input.product_id, input.quantity, reason, now],
+        "INSERT INTO inventory_movements (product_id, movement_type, quantity, reason, reference_id, actor_id, created_at)
+         VALUES (?1, 'adjustment', ?2, ?3, NULL, ?4, ?5)",
+        params![input.product_id, input.quantity, reason, actor_id, now],
     )
     .map_err(|error| error.to_string())?;
     tx.execute(

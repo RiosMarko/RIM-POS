@@ -442,6 +442,14 @@ pub(crate) fn migrate(conn: &Connection) -> CommandResult<()> {
         [],
     );
     let _ = conn.execute("ALTER TABLE suppliers ADD COLUMN contact TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE suppliers ADD COLUMN active INTEGER NOT NULL DEFAULT 1",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE inventory_movements ADD COLUMN actor_id INTEGER",
+        [],
+    );
     let _ = conn.execute("ALTER TABLE purchases ADD COLUMN note TEXT", []);
     let _ = conn.execute("ALTER TABLE purchases ADD COLUMN user_id INTEGER", []);
     let _ = conn.execute(

@@ -558,6 +558,13 @@ export async function upsertSupplier(input: SupplierInput): Promise<Supplier> {
   return supplier;
 }
 
+export async function deleteSupplier(id: number): Promise<void> {
+  if (isTauri()) {
+    return call<void>("supplier_delete", { actorId: requireActorId(), id });
+  }
+  mockSuppliers = mockSuppliers.filter((supplier) => supplier.id !== id);
+}
+
 export async function createPurchase(input: PurchaseInput): Promise<PurchaseReceipt> {
   if (isTauri()) {
     return call<PurchaseReceipt>("purchase_create", { actorId: requireActorId(), input });

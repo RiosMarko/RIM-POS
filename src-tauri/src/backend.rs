@@ -1189,6 +1189,32 @@ mod tests {
         assert_eq!(snapshot.canceled_tickets, 1);
         assert_eq!(snapshot.expected_cash, 80.0);
         assert_eq!(snapshot.cash_difference, Some(0.0));
+
+        let err = cancel_sale_with_conn(&mut conn, second.sale_id, 1, "Ya no quiero".into())
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "Venta de corte cerrado: registra devolucion en el turno actual"
+        );
+    }
+
+    #[test]
+    fn inventory_adjustment_carries_actor_name_for_reports() {
+        let conn = flow_conn();
+        conn.execute(
+            "INSERT INTO inventory_movements (product_id, movement_type, quantity, reason, reference_id, actor_id, created_at)
+             VALUES (1, 'adjustment', 5.0, 'Merma', NULL, 2, ?1)",
+            params![now_iso()],
+        )
+        .unwrap();
+        let actor_name: String = conn
+            .query_row(
+                "SELECT u.name FROM inventory_movements im JOIN users u ON u.id = im.actor_id WHERE im.product_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(actor_name, "Cajera");
     }
 
     #[test]
@@ -1581,6 +1607,7 @@ pub fn run() {
             crate::customers::customer_credit_adjust,
             crate::purchases::supplier_list,
             crate::purchases::supplier_upsert,
+            crate::purchases::supplier_delete,
             crate::purchases::purchase_create,
             crate::purchases::purchase_list,
             crate::invoices::tax_list,

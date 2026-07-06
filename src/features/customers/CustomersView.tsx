@@ -7,10 +7,10 @@ import { CustomerCreditModal, type CustomerCreditDraft } from "./CustomerModals"
 
 export function CustomersView({ showToast }: { showToast: (message: string) => void }) {
   const [customers, setCustomers] = useState<Customer[]>([]);
-  const [form, setForm] = useState({ name: "", phone: "", rfc: "", email: "", credit_limit: 0, id: undefined as number | undefined });
+  const [form, setForm] = useState({ name: "", phone: "", email: "", credit_limit: 0, id: undefined as number | undefined });
   const [creditDraft, setCreditDraft] = useState<CustomerCreditDraft | null>(null);
   const editing = Boolean(form.id);
-  const resetForm = () => setForm({ name: "", phone: "", rfc: "", email: "", credit_limit: 0, id: undefined });
+  const resetForm = () => setForm({ name: "", phone: "", email: "", credit_limit: 0, id: undefined });
 
   const refresh = useCallback(async () => {
     setCustomers(await listCustomers());
@@ -68,12 +68,11 @@ export function CustomersView({ showToast }: { showToast: (message: string) => v
       <form className="user-form" onSubmit={save}>
         <div>
           <h2>Clientes y credito</h2>
-          <p>RFC, telefono, limite y saldo.</p>
+          <p>Telefono, limite y saldo.</p>
         </div>
         <label>Nombre<input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></label>
         <label>Telefono<input value={form.phone} onChange={(event) => setForm({ ...form, phone: event.target.value })} /></label>
-        <label>RFC<input value={form.rfc} onChange={(event) => setForm({ ...form, rfc: event.target.value })} /></label>
-        <label>Email<input value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} /></label>
+        <label>Email<input value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} placeholder="opcional" /></label>
         <label>Limite credito<input type="number" value={form.credit_limit === 0 ? "" : form.credit_limit} onFocus={selectNumericInput} onChange={(event) => setForm({ ...form, credit_limit: Number(event.target.value) })} /></label>
         <div className="form-button-row">
           {editing && <button className="ghost-button" type="button" onClick={resetForm}>Nuevo cliente</button>}
@@ -93,7 +92,7 @@ export function CustomersView({ showToast }: { showToast: (message: string) => v
           <div className="customer-row" key={customer.id}>
             <div>
               <strong>{customer.name}</strong>
-              <span>{customer.phone || "Sin telefono"} · {customer.rfc || "Sin RFC"}{customer.email ? ` · ${customer.email}` : ""}</span>
+              <span>{customer.phone || "Sin telefono"}{customer.email ? ` · ${customer.email}` : ""}</span>
             </div>
             <strong>{money(customer.balance)}</strong>
             <span>{money(customer.credit_limit)}</span>
@@ -103,7 +102,6 @@ export function CustomersView({ showToast }: { showToast: (message: string) => v
               id: customer.id,
               name: customer.name,
               phone: customer.phone ?? "",
-              rfc: customer.rfc ?? "",
               email: customer.email ?? "",
               credit_limit: customer.credit_limit,
             })}>Editar</button>

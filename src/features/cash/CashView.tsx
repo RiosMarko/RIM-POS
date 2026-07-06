@@ -152,7 +152,7 @@ export function CashView({
   const [cashDialog, setCashDialog] = useState<"open" | "in" | "out" | "audit" | "close" | null>(null);
   const [cutSnapshot, setCutSnapshot] = useState<ShiftCutSnapshot | null>(null);
   const [dailyCut, setDailyCut] = useState<DailyCutSummary | null>(null);
-  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().slice(0, 10));
+  const selectedDate = new Date().toISOString().slice(0, 10);
   const [cancelDraft, setCancelDraft] = useState<SaleListItem | null>(null);
   const [cancelAdminDraft, setCancelAdminDraft] = useState<{ sale: SaleListItem; reason: string } | null>(null);
   const paidSales = useMemo(() => sales.filter((sale) => sale.status === "paid"), [sales]);
@@ -339,7 +339,6 @@ export function CashView({
         >
           Corte general
         </button>
-        <input type="date" value={selectedDate} onChange={(event) => setSelectedDate(event.target.value)} aria-label="Fecha corte general" />
       </div>
       {dailyCut && (
         <div className="cut-detail daily-cut-detail">

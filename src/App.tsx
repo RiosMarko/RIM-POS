@@ -4,7 +4,6 @@ import {
   Barcode,
   Boxes,
   DatabaseBackup,
-  PackagePlus,
   Settings,
   ShoppingCart,
   UserPlus,
@@ -73,10 +72,9 @@ const navItems: Array<NavItem<typeof ShoppingCart>> = [
   { key: "sale", label: "Caja", icon: ShoppingCart },
   { key: "products", label: "Productos", icon: Barcode, adminOnly: true, permission: "products" },
   { key: "inventory", label: "Inventario", icon: Boxes, adminOnly: true, permission: "inventory" },
-  { key: "customers", label: "Clientes", icon: Users, adminOnly: true, permission: "customers" },
+  { key: "customers", label: "Clientes y compras", icon: Users, adminOnly: true, permission: ["customers", "purchases"] },
   { key: "reports", label: "Reportes", icon: BarChart3, adminOnly: true, permission: "reports" },
   { key: "cash", label: "Corte", icon: Banknote },
-  { key: "purchases", label: "Compras", icon: PackagePlus, adminOnly: true, permission: "purchases" },
   { key: "users", label: "Usuarios", icon: UserPlus, adminOnly: true },
   { key: "settings", label: "Config", icon: Settings, adminOnly: true },
   { key: "administration", label: "Administracion", icon: DatabaseBackup, adminOnly: true },
@@ -102,6 +100,10 @@ function App() {
   const [setupRequired, setSetupRequired] = useState(false);
   const { notifications, showToast, dismissToast } = useToasts();
   const clock = useClock();
+  const handleTaxModeChange = useCallback(({ enabled, pricesIncludeTax: nextPricesIncludeTax }: { enabled: boolean; pricesIncludeTax: boolean }) => {
+    setTaxEnabled(enabled);
+    setPricesIncludeTax(nextPricesIncludeTax);
+  }, []);
   const { loginMaximized, windowTransition, enterPosMode, enterLoginMode } = useWindowMode(session);
   const [query, setQuery] = useState("");
   const [saleProducts, setSaleProducts] = useState<Product[]>([]);
@@ -292,7 +294,7 @@ function App() {
 
   useEffect(() => {
     if (!session) return;
-    if (!["products", "inventory", "purchases"].includes(currentView)) return;
+    if (!["products", "inventory"].includes(currentView)) return;
     refreshAdminProducts("", { limit: 51, offset: 0 }).catch((error) => showToast(String(error)));
   }, [currentView, refreshAdminProducts, session, showToast]);
 
@@ -1022,10 +1024,7 @@ function App() {
               refreshProducts={refreshAdminProducts}
               refreshSummary={refreshSummary}
               showToast={showToast}
-              onTaxModeChange={({ enabled, pricesIncludeTax: nextPricesIncludeTax }) => {
-                setTaxEnabled(enabled);
-                setPricesIncludeTax(nextPricesIncludeTax);
-              }}
+              onTaxModeChange={handleTaxModeChange}
               requestConfirm={setConfirmDraft}
               requestView={requestView}
             />

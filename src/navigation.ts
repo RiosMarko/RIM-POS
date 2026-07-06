@@ -7,7 +7,6 @@ export type ViewKey =
   | "customers"
   | "reports"
   | "cash"
-  | "purchases"
   | "invoices"
   | "users"
   | "settings"
@@ -18,7 +17,7 @@ export type NavItem<IconType> = {
   label: string;
   icon: IconType;
   adminOnly?: boolean;
-  permission?: PermissionKey;
+  permission?: PermissionKey | PermissionKey[];
 };
 
 export const userPermissionOptions: Array<{ key: PermissionKey; label: string; description: string }> = [
@@ -32,6 +31,7 @@ export const userPermissionOptions: Array<{ key: PermissionKey; label: string; d
 
 export const allUserPermissions = userPermissionOptions.map((option) => option.key);
 
-export function hasPermission(permissions: PermissionKey[] | undefined, permission: PermissionKey) {
+export function hasPermission(permissions: PermissionKey[] | undefined, permission: PermissionKey | PermissionKey[]) {
+  if (Array.isArray(permission)) return permission.some((key) => permissions?.includes(key));
   return Boolean(permissions?.includes(permission));
 }

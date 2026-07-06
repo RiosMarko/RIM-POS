@@ -65,13 +65,6 @@ function endOfMonth(date: Date) {
   return new Date(date.getFullYear(), date.getMonth() + 1, 0);
 }
 
-function monthRange(monthKey: string) {
-  const [year, month] = monthKey.split("-").map(Number);
-  if (!year || !month) return null;
-  const start = new Date(year, month - 1, 1);
-  return { from: dateKey(start), to: dateKey(endOfMonth(start)) };
-}
-
 function shortDateLabel(date: Date) {
   return formatDateMx(date);
 }
@@ -131,19 +124,17 @@ function ReportStat({
 
 export function ReportsView({ showToast }: { showToast: (message: string) => void }) {
   const todayKey = dateKey(new Date());
-  const monthStartKey = dateKey(new Date(new Date().getFullYear(), new Date().getMonth(), 1));
   const [products, setProducts] = useState<ProductSalesReport[]>([]);
   const [unsoldProducts, setUnsoldProducts] = useState<ProductSalesReport[]>([]);
   const [movements, setMovements] = useState<ReportMovement[]>([]);
   const [monthly, setMonthly] = useState<MonthlySalesReport[]>([]);
   const [taxBreakdown, setTaxBreakdown] = useState<TaxBreakdown[]>([]);
   const [activeTab, setActiveTab] = useState<ReportTab>("today");
-  const [activePreset, setActivePreset] = useState<DatePreset | null>("month");
+  const [activePreset, setActivePreset] = useState<DatePreset | null>(null);
   const [filterKind, setFilterKind] = useState<"all" | ReportMovement["kind"]>("all");
   const [filterText, setFilterText] = useState("");
-  const [fromDate, setFromDate] = useState(monthStartKey);
+  const [fromDate, setFromDate] = useState(todayKey);
   const [toDate, setToDate] = useState(todayKey);
-  const [selectedMonth, setSelectedMonth] = useState(todayKey.slice(0, 7));
 
   const refresh = useCallback(async () => {
     const range = { fromDate: fromDate || undefined, toDate: toDate || undefined };
@@ -181,7 +172,6 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
       const end = endOfMonth(now);
       setFromDate(dateKey(start));
       setToDate(dateKey(end));
-      setSelectedMonth(dateKey(start).slice(0, 7));
       return;
     }
     if (preset === "lastMonth") {
@@ -189,7 +179,6 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
       const end = endOfMonth(start);
       setFromDate(dateKey(start));
       setToDate(dateKey(end));
-      setSelectedMonth(dateKey(start).slice(0, 7));
       return;
     }
     if (preset === "year") {
@@ -201,15 +190,6 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
     }
     setFromDate("");
     setToDate("");
-  };
-
-  const applyMonth = (monthKey: string) => {
-    setSelectedMonth(monthKey);
-    const range = monthRange(monthKey);
-    if (!range) return;
-    setActivePreset(null);
-    setFromDate(range.from);
-    setToDate(range.to);
   };
 
   const periodLabel = useMemo(() => {
@@ -330,11 +310,7 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
   ];
   const paymentTotal = Math.max(1, paymentSummary.reduce((sum, item) => sum + item.value, 0));
 
-  const visibleMovements = activeTab === "today"
-    ? filteredMovements.slice(0, 12)
-    : activeTab === "cuts"
-      ? cutMovements
-      : filteredMovements;
+  const visibleMovements = activeTab === "cuts" ? cutMovements : filteredMovements;
   const visibleMonthly = useMemo(() => monthly.filter((row) => {
     const month = row.month;
     if (fromDate && month < fromDate.slice(0, 7)) return false;
@@ -392,7 +368,14 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
             role="tab"
             aria-selected={activeTab === tab.key}
             key={tab.key}
-            onClick={() => setActiveTab(tab.key)}
+            onClick={() => {
+              setActiveTab(tab.key);
+              if (tab.key === "today") {
+                setActivePreset(null);
+                setFromDate(todayKey);
+                setToDate(todayKey);
+              }
+            }}
           >
             {tab.label}
           </button>
@@ -406,14 +389,10 @@ export function ReportsView({ showToast }: { showToast: (message: string) => voi
               {preset.label}
             </button>
           ))}
-          <button className={activePreset === null ? "active" : undefined} type="button" onClick={() => setActivePreset(null)}>
+          <button className={activePreset === null && activeTab !== "today" ? "active" : undefined} type="button" onClick={() => setActivePreset(null)}>
             Periodo...
           </button>
         </div>
-        <label>
-          Mes
-          <input type="month" value={selectedMonth} onChange={(event) => applyMonth(event.target.value)} />
-        </label>
         <label>
           Desde
           <input type="date" value={fromDate} onChange={(event) => {
