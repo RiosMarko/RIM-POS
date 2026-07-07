@@ -464,6 +464,19 @@ function App() {
     }
   };
 
+  const reprintLastTicket = async () => {
+    if (!lastReceipt) {
+      showToast("No hay ticket para reimprimir");
+      return;
+    }
+    try {
+      await printTicket(lastReceipt.sale_id);
+      showToast(`Ticket ${lastReceipt.folio} reimpreso`);
+    } catch (error) {
+      showToast(`Ticket no impreso: ${String(error)}`);
+    }
+  };
+
   const recordExpense = async (provider: string, amount: number) => {
     if (!session) return;
     const cashSessionId = summary?.open_cash_session?.id;
@@ -1003,6 +1016,7 @@ function App() {
               updateLine={updateLine}
               selectCartLine={setSelectedCartProductId}
               completeSale={completeSale}
+              onReprintLast={reprintLastTicket}
               holdCurrentTicket={openHoldTicketDialog}
               newTicket={() => startNewTicket()}
               recoverHeldTicket={recoverHeldTicket}

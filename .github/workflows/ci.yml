@@ -35,5 +35,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - run: cargo check --locked --manifest-path src-tauri/Cargo.toml
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets
+      - if: matrix.platform == 'macos-latest'
+        run: cargo install cargo-audit --locked
+      - if: matrix.platform == 'macos-latest'
+        run: cargo audit --file src-tauri/Cargo.lock

@@ -90,9 +90,13 @@ export function SettingsView({
     const printerExists = result.some((device) => device.id === current.printer && (device.device_type === "printer" || device.device_type === "serial"));
     const scaleExists = result.some((device) => device.id === current.scale && device.device_type === "serial");
     const drawerExists = result.some((device) => device.id === current.drawer && (device.device_type === "printer" || device.device_type === "serial"));
-    const nextPrinter = printerExists ? current.printer : defaultPrinter?.id ?? "";
-    const nextScale = scaleExists ? current.scale : defaultSerial?.id ?? "";
-    const nextDrawer = drawerExists ? current.drawer : defaultSerial?.id ?? defaultPrinter?.id ?? "";
+    // Nunca borrar un dispositivo ya guardado por no detectarlo (ej. impresora WiFi).
+    // Solo autollenar con el detectado por defecto cuando no hay nada configurado.
+    const nextPrinter = printerExists ? current.printer : current.printer || defaultPrinter?.id || "";
+    const nextScale = scaleExists ? current.scale : current.scale || defaultSerial?.id || "";
+    const nextDrawer = drawerExists
+      ? current.drawer
+      : current.drawer || defaultSerial?.id || defaultPrinter?.id || "";
 
     if (nextPrinter !== current.printer) {
       setPrinter(nextPrinter);
@@ -557,6 +561,9 @@ export function SettingsView({
                 Impresora ticket
                 <select value={printer} onChange={(event) => setPrinter(event.target.value)}>
                   <option value="">Seleccionar impresora</option>
+                  {printer && !printerDevices.some((device) => device.id === printer) && (
+                    <option value={printer}>{printer} (guardada, no detectada)</option>
+                  )}
                   {printerDevices.map((device) => (
                     <option value={device.id} key={device.id}>
                       {device.device_type === "serial" ? `Directo por ${deviceLabel(device)}` : deviceLabel(device)}
@@ -568,6 +575,9 @@ export function SettingsView({
                 Impresora corte
                 <select value={cutPrinter} onChange={(event) => setCutPrinter(event.target.value)}>
                   <option value="">Usar la misma que ticket</option>
+                  {cutPrinter && !printerDevices.some((device) => device.id === cutPrinter) && (
+                    <option value={cutPrinter}>{cutPrinter} (guardada, no detectada)</option>
+                  )}
                   {printerDevices.map((device) => (
                     <option value={device.id} key={`cut-${device.id}`}>
                       {device.device_type === "serial" ? `Directo por ${deviceLabel(device)}` : deviceLabel(device)}
@@ -579,6 +589,9 @@ export function SettingsView({
                 Bascula
                 <select value={scale} onChange={(event) => setScale(event.target.value)}>
                   <option value="">Seleccionar puerto</option>
+                  {scale && !serialDevices.some((device) => device.id === scale) && (
+                    <option value={scale}>{scale} (guardada, no detectada)</option>
+                  )}
                   {serialDevices.map((device) => (
                     <option value={device.id} key={device.id}>{deviceLabel(device)}</option>
                   ))}
@@ -603,6 +616,9 @@ export function SettingsView({
                 Cajon
                 <select value={drawer} onChange={(event) => setDrawer(event.target.value)}>
                   <option value="">Seleccionar dispositivo</option>
+                  {drawer && !printers.some((device) => device.id === drawer) && !serialDevices.some((device) => device.id === drawer) && (
+                    <option value={drawer}>{drawer} (guardada, no detectada)</option>
+                  )}
                   {printers.map((device) => (
                     <option value={device.id} key={`printer-${device.id}`}>Pulso por {device.name}</option>
                   ))}

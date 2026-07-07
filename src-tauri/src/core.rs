@@ -21,6 +21,18 @@ pub fn round_money(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
 }
 
+/// Formatea una cantidad quitando ceros decimales sobrantes.
+/// 2.0 -> "2", 0.5 -> "0.5", 0.781 -> "0.781", 0.780 -> "0.78".
+pub fn format_quantity(value: f64) -> String {
+    let text = format!("{value:.3}");
+    let trimmed = text.trim_end_matches('0').trim_end_matches('.');
+    if trimmed.is_empty() {
+        "0".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 pub fn period_key(created_at: &str) -> Result<String, String> {
     created_at
         .get(0..7)
@@ -49,6 +61,17 @@ pub fn average_ticket(total: f64, tickets: i64) -> f64 {
 mod tests {
     use super::{should_run_auto_backup, today_local_key};
     use chrono::{Duration, Local, Utc};
+
+    #[test]
+    fn format_quantity_trims_trailing_zeros() {
+        use super::format_quantity;
+        assert_eq!(format_quantity(2.0), "2");
+        assert_eq!(format_quantity(3.0), "3");
+        assert_eq!(format_quantity(0.5), "0.5");
+        assert_eq!(format_quantity(0.781), "0.781");
+        assert_eq!(format_quantity(0.78), "0.78");
+        assert_eq!(format_quantity(0.0), "0");
+    }
 
     #[test]
     fn auto_backup_runs_when_no_previous_backup() {

@@ -1,7 +1,7 @@
 use crate::auth::{require_active_user, require_admin};
 use crate::backup::{backup_create_with_conn, BackupResult};
 use crate::cash::get_cash_session;
-use crate::core::{now_iso, round_money, should_run_auto_backup};
+use crate::core::{format_quantity, now_iso, round_money, should_run_auto_backup};
 #[cfg(test)]
 use crate::core::{average_ticket, next_monthly_seq, period_key, visible_monthly_folio};
 use crate::hardware::{
@@ -16,7 +16,7 @@ use crate::security::legacy_hash_pin;
 use crate::settings_access::{is_invoice_setting_key, is_public_setting_key};
 #[cfg(test)]
 use crate::validation;
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Local, Utc};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::collections::HashMap;
 use std::env;
@@ -361,7 +361,17 @@ fn receipt_text(conn: &Connection, sale_id: i64) -> CommandResult<String> {
     }
     text.push_str(&format!("Folio {folio}\n"));
     if show_date {
-        text.push_str(&format!("{created_at}\n"));
+        match DateTime::parse_from_rfc3339(&created_at) {
+            Ok(parsed) => {
+                let local = parsed.with_timezone(&Local);
+                text.push_str(&format!(
+                    "{}   {}\n",
+                    local.format("%Y-%m-%d"),
+                    local.format("%-I:%M %P")
+                ));
+            }
+            Err(_) => text.push_str(&format!("{created_at}\n")),
+        }
     }
     if show_cashier {
         text.push_str(&format!("Cajero: {cashier_name}\n"));
@@ -393,7 +403,10 @@ fn receipt_text(conn: &Connection, sale_id: i64) -> CommandResult<String> {
         let (name, barcode, quantity, unit_price, discount, line_total) =
             row.map_err(|error| error.to_string())?;
         item_count += quantity;
-        text.push_str(&format!("{name}\n  {quantity:.3} @ ${unit_price:.2}"));
+        text.push_str(&format!(
+            "{name}\n  {} @ ${unit_price:.2}",
+            format_quantity(quantity)
+        ));
         if discount > 0.0 {
             text.push_str(&format!(" desc ${discount:.2}"));
         }
@@ -401,6 +414,7 @@ fn receipt_text(conn: &Connection, sale_id: i64) -> CommandResult<String> {
         if show_barcode && !barcode.trim().is_empty() {
             text.push_str(&format!("  {barcode}\n"));
         }
+        text.push('\n');
     }
     text.push_str(&format!("{separator}\n"));
     if show_tax {
@@ -410,7 +424,7 @@ fn receipt_text(conn: &Connection, sale_id: i64) -> CommandResult<String> {
     }
     text.push_str(&format!("*** TOTAL       ${total:.2}\nPAGADO          ${paid:.2}\nCAMBIO          ${change_due:.2}\n"));
     if show_item_count {
-        text.push_str(&format!("Articulos: {item_count:.3}\n"));
+        text.push_str(&format!("Articulos: {}\n", format_quantity(item_count)));
     }
     if !footer.trim().is_empty() {
         text.push('\n');
@@ -1533,7 +1547,13 @@ mod tests {
         close_shift_cut_z_with_conn(&mut conn, second_shift_id, 50.0, 2, Some("[]".into()), None)
             .unwrap();
 
-        let date = first_cut.closed_at.clone().unwrap()[..10].to_string();
+        // El corte diario filtra por dia LOCAL (date(closed_at,'localtime')).
+        // Derivar la fecha esperada igual, no del slice UTC, para no fallar cerca de medianoche UTC.
+        let date = DateTime::parse_from_rfc3339(first_cut.closed_at.as_deref().unwrap())
+            .unwrap()
+            .with_timezone(&Local)
+            .format("%Y-%m-%d")
+            .to_string();
         let summary = daily_cut_summary_with_conn(&conn, Some(date)).unwrap();
         assert_eq!(summary.cut_count, 2);
         assert_eq!(summary.total_tickets, 2);

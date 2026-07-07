@@ -805,6 +805,7 @@ export async function createSale(input: {
     transfer_paid: input.payments.filter((payment) => payment.method === "transfer").reduce((sum, payment) => sum + payment.amount, 0),
     status: "paid",
     created_at: receipt.created_at,
+    cancelable: true,
   });
   mockSaleItems.set(receipt.sale_id, input.items.map((item) => ({ product_id: item.product_id, quantity: item.quantity })));
   input.items.forEach((item) => {
@@ -872,7 +873,7 @@ export async function cancelSale(input: { sale_id: number; actor_id: number; rea
     mockCashSession.sales_total = Math.max(0, mockCashSession.sales_total - sale.total);
     mockCashSession.expected_cash -= cashPaid - changeDue;
   }
-  mockSales = mockSales.map((candidate) => (candidate.id === input.sale_id ? { ...candidate, status: "canceled" } : candidate));
+  mockSales = mockSales.map((candidate) => (candidate.id === input.sale_id ? { ...candidate, status: "canceled", cancelable: false } : candidate));
 }
 
 export async function openCashSession(openingCash: number, openedBy = 1): Promise<CashSession> {

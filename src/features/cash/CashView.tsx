@@ -755,7 +755,13 @@ export function CashView({
               <span>{money(sale.total)}</span>
               <span>E {money(sale.cash_paid ?? 0)} / Tar {money(sale.card_paid ?? 0)} / Transf {money(sale.transfer_paid ?? 0)}</span>
               <span>{sale.status === "paid" ? "Pagada" : "Cancelada"}</span>
-              <button className="danger-button mini" type="button" disabled={sale.status !== "paid"} onClick={() => setCancelDraft(sale)}>
+              <button
+                className="danger-button mini"
+                type="button"
+                disabled={!sale.cancelable}
+                title={sale.cancelable ? "Cancelar venta" : "Turno cerrado: registra devolucion en el turno actual"}
+                onClick={() => setCancelDraft(sale)}
+              >
                 Cancelar
               </button>
             </div>

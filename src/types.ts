@@ -108,6 +108,7 @@ export type SaleListItem = {
   transfer_paid?: number;
   status: string;
   created_at: string;
+  cancelable?: boolean;
 };
 
 export type ShiftCutSnapshot = {

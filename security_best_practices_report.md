@@ -27,7 +27,7 @@ Estado mejorado. Se cerro `product_search` y `tax_list`, se separaron helpers ba
 - `period_lock` exige admin y escribe auditoria.
 - Lecturas sensibles/reportes/settings exigen `actorId`.
 - Backups usan permisos privados y retencion.
-- CI corre `cargo audit`.
+- CI corre `cargo audit` y `cargo clippy` (job `rust` en `.github/workflows/ci.yml`; audit gateado a macOS).
 - PIN usa Argon2.
 - CSV neutraliza formula injection.
 

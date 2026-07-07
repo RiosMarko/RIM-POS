@@ -39,6 +39,7 @@ export function SaleView({
   updateLine,
   selectCartLine,
   completeSale,
+  onReprintLast,
   holdCurrentTicket,
   newTicket,
   recoverHeldTicket,
@@ -78,6 +79,7 @@ export function SaleView({
   updateLine: (productId: number, patch: Partial<Pick<CartLine, "quantity" | "discount">>) => void;
   selectCartLine: (productId: number) => void;
   completeSale: (options?: { printTicket?: boolean }) => Promise<void>;
+  onReprintLast: () => void | Promise<void>;
   holdCurrentTicket: () => void | Promise<void>;
   newTicket: () => void | Promise<void>;
   recoverHeldTicket: (ticket: HeldTicket) => Promise<void>;
@@ -407,6 +409,9 @@ export function SaleView({
             <span>Ultima venta</span>
             <strong>{lastReceipt.folio}</strong>
             <small>{money(lastReceipt.total)}</small>
+            <button className="ghost-button mini" type="button" onClick={() => onReprintLast()}>
+              <Ticket size={14} /> Reimprimir ticket
+            </button>
           </div>
         )}
       </aside>

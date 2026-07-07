@@ -508,11 +508,13 @@ pub(crate) fn sale_list(
                     COALESCE(SUM(CASE WHEN p.method = 'cash' THEN p.amount ELSE 0 END), 0),
                     COALESCE(SUM(CASE WHEN p.method = 'card' THEN p.amount ELSE 0 END), 0),
                     COALESCE(SUM(CASE WHEN p.method = 'transfer' THEN p.amount ELSE 0 END), 0),
-                    s.status, s.created_at
+                    s.status, s.created_at,
+                    CASE WHEN s.status = 'paid' AND cs.status = 'open' THEN 1 ELSE 0 END
              FROM sales s
              JOIN users u ON u.id = s.cashier_id
              LEFT JOIN payments p ON p.sale_id = s.id
-             GROUP BY s.id, s.folio, u.name, s.total, s.paid, s.status, s.created_at
+             LEFT JOIN cash_sessions cs ON cs.id = s.cash_session_id
+             GROUP BY s.id, s.folio, u.name, s.total, s.paid, s.status, s.created_at, cs.status
              ORDER BY s.id DESC
              LIMIT ?1",
         )
@@ -530,6 +532,7 @@ pub(crate) fn sale_list(
                 transfer_paid: row.get(7)?,
                 status: row.get(8)?,
                 created_at: row.get(9)?,
+                cancelable: row.get::<_, i64>(10)? == 1,
             })
         })
         .map_err(|error| error.to_string())?;

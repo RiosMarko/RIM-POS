@@ -284,6 +284,8 @@ pub(crate) struct SaleListItem {
     pub(crate) transfer_paid: f64,
     pub(crate) status: String,
     pub(crate) created_at: String,
+    // true solo si la venta esta pagada y su turno sigue abierto (cancelable directo).
+    pub(crate) cancelable: bool,
 }
 
 #[derive(Debug, Serialize)]
