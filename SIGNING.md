@@ -4,10 +4,11 @@ Sin firma, Windows muestra SmartScreen ("aplicación no reconocida") y macOS
 bloquea con Gatekeeper. Una cajera no técnica no pasa de ahí. Firmar quita esas
 barreras y da confianza de que el instalador viene de ti y no fue alterado.
 
-El pipeline (`.github/workflows/release.yml`) ya está preparado para macOS: lee
-secrets de GitHub y firma solo si están cargados (vacíos = build sin firma, no
-falla). Windows requiere un paso extra de configuración después de comprar el
-certificado (abajo).
+El pipeline (`.github/workflows/release.yml`) ya está preparado para macOS: solo
+pasa las variables `APPLE_*` a Tauri cuando todos los secrets requeridos existen.
+No declares variables `APPLE_*` vacías; Tauri intenta firmar si las recibe y el
+build falla. Windows requiere un paso extra de configuración después de comprar
+el certificado (abajo).
 
 ## macOS — Apple Developer ID (ya cableado)
 

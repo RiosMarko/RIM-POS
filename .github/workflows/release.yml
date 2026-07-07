@@ -19,6 +19,8 @@ jobs:
           - platform: windows-latest
             args: --bundles msi,nsis
     runs-on: ${{ matrix.platform }}
+    env:
+      HAS_APPLE_SIGNING_SECRETS: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_SIGNING_IDENTITY != '' && secrets.APPLE_ID != '' && secrets.APPLE_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -31,10 +33,23 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run typecheck
-      - uses: tauri-apps/tauri-action@v0.5.25
+      - name: Build unsigned app
+        if: ${{ matrix.platform != 'macos-latest' || env.HAS_APPLE_SIGNING_SECRETS != 'true' }}
+        uses: tauri-apps/tauri-action@v0.5.25
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Firma + notarizacion macOS. Vacio = tauri omite firma sin fallar.
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "RIM-POS ${{ github.ref_name }}"
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: false
+          args: ${{ matrix.args }}
+      - name: Build signed macOS app
+        if: ${{ matrix.platform == 'macos-latest' && env.HAS_APPLE_SIGNING_SECRETS == 'true' }}
+        uses: tauri-apps/tauri-action@v0.5.25
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Cargar estos secrets en GitHub tras comprar Apple Developer ID. Ver SIGNING.md.
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
