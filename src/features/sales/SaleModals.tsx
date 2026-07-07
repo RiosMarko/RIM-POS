@@ -202,14 +202,14 @@ export function TicketNameModal({
               ref={inputRef}
               value={name}
               onChange={(event) => setName(event.target.value)}
-              placeholder="Ej. Juan, Mesa 2, Pedido pan"
+              placeholder="Vacio + Enter = Ticket automatico"
             />
           </label>
           <div className="modal-actions">
             <button className="ghost-button" type="button" onClick={onClose}>
               Cancelar
             </button>
-            <button className="primary-button" type="submit" disabled={name.trim().length < 2}>
+            <button className="primary-button" type="submit">
               Guardar ticket
             </button>
           </div>

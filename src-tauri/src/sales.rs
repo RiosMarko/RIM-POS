@@ -714,7 +714,25 @@ pub(crate) fn return_sale_item_with_conn(
 
     let unit_effective = if sold_qty > 0.0 { line_total / sold_qty } else { 0.0 };
     let refund_total = round_money(unit_effective * quantity);
-    let cash_refund = refund_total;
+
+    // Only the cash the drawer actually took in for this sale can leave it as a
+    // cash refund. A card/transfer sale refunds to the card, so it must NOT
+    // reduce expected cash; otherwise the cut shows less cash than counted.
+    let (sale_total, sale_cash_net): (f64, f64) = tx
+        .query_row(
+            "SELECT s.total,
+                    COALESCE((SELECT SUM(amount) FROM payments WHERE sale_id = s.id AND method = 'cash'), 0) - s.change_due
+             FROM sales s WHERE s.id = ?1",
+            params![sale_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| error.to_string())?;
+    let cash_ratio = if sale_total > 0.0 {
+        (sale_cash_net / sale_total).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let cash_refund = round_money(refund_total * cash_ratio);
     let now = now_iso();
 
     tx.execute(

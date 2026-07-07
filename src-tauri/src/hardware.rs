@@ -725,6 +725,12 @@ pub fn run_print_file(printer: &str, file: &PathBuf, raw: bool) -> CommandResult
 
     #[cfg(not(windows))]
     {
+        // CUPS stops a queue after a failed job (default error policy), which
+        // silently holds every later job. Re-enable and un-pause the queue
+        // before printing so a past jam doesn't keep new tickets stuck.
+        let _ = Command::new("cupsenable").arg(&printer).output();
+        let _ = Command::new("cupsaccept").arg(&printer).output();
+
         let file_path = file.to_string_lossy().to_string();
         let mut command = Command::new("lp");
         if raw {

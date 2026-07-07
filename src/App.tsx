@@ -698,15 +698,15 @@ function App() {
 
   const saveOpenTicket = async (name: string, ticketId?: number) => {
     if (!session) return;
-    if (name.length < 2) {
-      showToast("Nombre de ticket requerido");
-      return;
-    }
+    // Empty name (just Enter) auto-labels as "Ticket N", where N follows the
+    // tickets already sold today plus the ones currently left open.
+    const nextTicketNumber = (summary?.today_tickets ?? 0) + heldTickets.length + 1;
+    const finalName = name.trim().length > 0 ? name.trim() : `Ticket ${nextTicketNumber}`;
     const current = ticketId ? heldTickets.find((ticket) => ticket.id === ticketId) : null;
     try {
       const ticket = await saveHeldTicket({
         id: current?.id,
-        name,
+        name: finalName,
         cashier_id: session.id,
         items: cartToHeldItems(),
       });

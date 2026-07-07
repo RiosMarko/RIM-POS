@@ -413,6 +413,7 @@ pub(crate) fn report_movement_history(
                    WHEN 'cancel' THEN 'cancelacion'
                    WHEN 'edit' THEN 'edicion'
                    WHEN 'adjustment' THEN 'ajuste'
+                   WHEN 'return' THEN 'devolucion'
                    ELSE im.movement_type
                  END,
                  p.name || ' · ' || im.reason || ' · ' ||

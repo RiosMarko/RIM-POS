@@ -433,6 +433,38 @@ fn receipt_text(conn: &Connection, sale_id: i64) -> CommandResult<String> {
         text.push_str(footer.trim());
         text.push('\n');
     }
+
+    // Card sales get a credit voucher at the bottom: label, signature space and
+    // the terminal used (stored in the card payment's reference).
+    let card_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM payments WHERE sale_id = ?1 AND method = 'card'",
+            params![sale_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if card_count > 0 {
+        let card_terminal: Option<String> = conn
+            .query_row(
+                "SELECT MAX(reference) FROM payments
+                 WHERE sale_id = ?1 AND method = 'card' AND TRIM(COALESCE(reference, '')) <> ''",
+                params![sale_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        text.push_str(&format!("{separator}\n"));
+        text.push_str("VENTA A CREDITO\n");
+        text.push_str("FIRMA DEL CLIENTE\n");
+        text.push_str("\n\n\n");
+        text.push_str(&format!("{}\n", "_".repeat(width)));
+        if let Some(terminal) = card_terminal {
+            let terminal = terminal.trim();
+            if !terminal.is_empty() {
+                text.push_str(&format!("TERMINAL {terminal}\n"));
+            }
+        }
+    }
+
     text.push_str(&"\n".repeat(extra_lines));
     Ok(text)
 }
@@ -445,6 +477,8 @@ fn escpos_ticket_bytes(text: &str, copies: i64) -> Vec<u8> {
     let mut bytes = Vec::new();
     for _ in 0..copies.max(1) {
         bytes.extend_from_slice(&[0x1B, 0x40]); // ESC @  -> reset printer
+        bytes.extend_from_slice(&[0x1B, 0x45, 0x01]); // ESC E 1 -> emphasized (bold)
+        bytes.extend_from_slice(&[0x1B, 0x47, 0x01]); // ESC G 1 -> double-strike (darker)
         bytes.extend_from_slice(text.as_bytes());
         bytes.extend_from_slice(b"\n\n\n"); // feed before cut
         bytes.extend_from_slice(&[0x1D, 0x56, 0x42, 0x00]); // GS V B 0 -> feed + partial cut
@@ -452,12 +486,39 @@ fn escpos_ticket_bytes(text: &str, copies: i64) -> Vec<u8> {
     bytes
 }
 
+// Prints the receipt as plain text through the printer's driver. Correct for a
+// normal printer (Brother, laser, inkjet): sending it ESC/POS raw would jam the
+// queue because the driver can't interpret raw bytes.
+fn print_ticket_text(printer: &str, text: &str, copies: i64) -> CommandResult<()> {
+    let text = if copies > 1 {
+        (0..copies).map(|_| text.to_string()).collect::<Vec<_>>().join("\n")
+    } else {
+        text.to_string()
+    };
+    let file = temp_hardware_file("rim-pos-ticket", "txt");
+    fs::write(&file, text).map_err(|error| format!("No se pudo crear ticket temporal: {error}"))?;
+    let result = run_print_file(printer, &file, false);
+    let _ = fs::remove_file(file);
+    result
+}
+
 #[tauri::command]
 fn print_ticket(state: State<'_, AppState>, sale_id: i64) -> CommandResult<HardwareResult> {
     let conn = state.db.lock().map_err(|error| error.to_string())?;
     let printer = setting_string(&conn, "printer")?.unwrap_or_default();
     let copies = ticket_setting_i64(&conn, "ticket_copies", 1, 1, 4)?;
+    // Thermal ESC/POS (POS-58) by default; switch off for a normal driver
+    // printer (Brother etc.) so its queue doesn't jam with raw bytes.
+    let escpos = setting_bool(&conn, "ticket_escpos", true)?;
     let text = receipt_text(&conn, sale_id)?;
+
+    if !escpos {
+        print_ticket_text(&printer, &text, copies)?;
+        return Ok(HardwareResult {
+            ok: true,
+            message: format!("Ticket enviado a {printer}"),
+        });
+    }
 
     // Send ESC/POS raw so CUPS (macOS/Linux) and raw/network/COM ports (any OS)
     // print the ticket at 58mm and cut, instead of stretching it to a full page.
@@ -471,15 +532,7 @@ fn print_ticket(state: State<'_, AppState>, sale_id: i64) -> CommandResult<Hardw
     // plain-text path (Out-Printer) so those setups keep working.
     #[cfg(windows)]
     if raw_result.is_err() {
-        let text = if copies > 1 {
-            (0..copies).map(|_| text.clone()).collect::<Vec<_>>().join("\n")
-        } else {
-            text
-        };
-        let file = temp_hardware_file("rim-pos-ticket", "txt");
-        fs::write(&file, text).map_err(|error| format!("No se pudo crear ticket temporal: {error}"))?;
-        run_print_file(&printer, &file, false)?;
-        let _ = fs::remove_file(file);
+        print_ticket_text(&printer, &text, copies)?;
     }
     #[cfg(not(windows))]
     raw_result?;
@@ -1237,13 +1290,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(second.total, 20.0);
+        // Drawer physically holds 120: opening 100, +50 -10 change (sale 1),
+        // -40 refund on cancel, +20 (sale 2). The cut must expect 120, not
+        // double-subtract the canceled sale's cash.
         let snapshot =
-            close_shift_cut_z_with_conn(&mut conn, shift_id, 80.0, 2, Some("[]".into()), None)
+            close_shift_cut_z_with_conn(&mut conn, shift_id, 120.0, 2, Some("[]".into()), None)
                 .unwrap();
         assert_eq!(snapshot.status, "closed");
         assert_eq!(snapshot.total_tickets, 1);
         assert_eq!(snapshot.canceled_tickets, 1);
-        assert_eq!(snapshot.expected_cash, 80.0);
+        assert_eq!(snapshot.expected_cash, 120.0);
         assert_eq!(snapshot.cash_difference, Some(0.0));
 
         let err = cancel_sale_with_conn(&mut conn, second.sale_id, 1, "Ya no quiero".into())
@@ -1342,6 +1398,80 @@ mod tests {
         // Two copies -> two init sequences and two cut sequences.
         assert_eq!(bytes.windows(2).filter(|w| *w == [0x1B, 0x40]).count(), 2);
         assert_eq!(bytes.windows(4).filter(|w| *w == [0x1D, 0x56, 0x42, 0x00]).count(), 2);
+    }
+
+    #[test]
+    fn card_sale_return_does_not_touch_expected_cash() {
+        let mut conn = flow_conn();
+        let session = open_cash_session_with_conn(&conn, 2, 100.0).unwrap();
+        let sale = create_sale_with_conn(
+            &mut conn,
+            SaleDraft {
+                cashier_id: 2,
+                customer_id: None,
+                items: vec![SaleItemInput { product_id: 1, quantity: 1.0, unit_price: 20.0, discount: 0.0 }],
+                payments: vec![PaymentInput { method: "card".into(), amount: 20.0, reference: Some("TERM-1".into()) }],
+                notes: None,
+            },
+        )
+        .unwrap();
+        // Card sale adds no cash to the drawer.
+        let cash_after_sale: f64 = conn
+            .query_row("SELECT expected_cash FROM cash_sessions WHERE id = ?1", params![session.id], |row| row.get(0))
+            .unwrap();
+        assert_eq!(cash_after_sale, 100.0);
+
+        let sale_item_id: i64 = conn
+            .query_row("SELECT id FROM sale_items WHERE sale_id = ?1", params![sale.sale_id], |row| row.get(0))
+            .unwrap();
+        return_sale_item_with_conn(&mut conn, 1, sale_item_id, 1.0, "Devolucion tarjeta".into()).unwrap();
+
+        // Refund goes back to the card: no cash leaves the drawer.
+        let cash_refund: f64 = conn
+            .query_row("SELECT cash_refund FROM sale_returns WHERE sale_item_id = ?1", params![sale_item_id], |row| row.get(0))
+            .unwrap();
+        assert_eq!(cash_refund, 0.0);
+        let cash_after_return: f64 = conn
+            .query_row("SELECT expected_cash FROM cash_sessions WHERE id = ?1", params![session.id], |row| row.get(0))
+            .unwrap();
+        assert_eq!(cash_after_return, 100.0);
+    }
+
+    #[test]
+    fn card_sale_receipt_adds_credit_voucher_with_terminal() {
+        let mut conn = flow_conn();
+        let _session = open_cash_session_with_conn(&conn, 2, 100.0).unwrap();
+        let card = create_sale_with_conn(
+            &mut conn,
+            SaleDraft {
+                cashier_id: 2,
+                customer_id: None,
+                items: vec![SaleItemInput { product_id: 1, quantity: 1.0, unit_price: 20.0, discount: 0.0 }],
+                payments: vec![PaymentInput { method: "card".into(), amount: 20.0, reference: Some("BANORTE-1".into()) }],
+                notes: None,
+            },
+        )
+        .unwrap();
+        let cash = create_sale_with_conn(
+            &mut conn,
+            SaleDraft {
+                cashier_id: 2,
+                customer_id: None,
+                items: vec![SaleItemInput { product_id: 1, quantity: 1.0, unit_price: 20.0, discount: 0.0 }],
+                payments: vec![PaymentInput { method: "cash".into(), amount: 20.0, reference: None }],
+                notes: None,
+            },
+        )
+        .unwrap();
+
+        let card_ticket = receipt_text(&conn, card.sale_id).unwrap();
+        assert!(card_ticket.contains("VENTA A CREDITO"), "{card_ticket}");
+        assert!(card_ticket.contains("FIRMA DEL CLIENTE"));
+        assert!(card_ticket.contains("TERMINAL BANORTE-1"));
+
+        // Cash sale must NOT get the credit voucher.
+        let cash_ticket = receipt_text(&conn, cash.sale_id).unwrap();
+        assert!(!cash_ticket.contains("VENTA A CREDITO"), "{cash_ticket}");
     }
 
     #[test]
@@ -1599,7 +1729,10 @@ mod tests {
         assert_eq!(snapshot.cash_out_total, 5.0);
         assert_eq!(snapshot.cash_refunds_total, 20.0);
         assert_eq!(snapshot.credit_payments_total, 15.0);
-        assert_eq!(snapshot.expected_cash, 140.0);
+        // Drawer really holds 160: opening 100 + 40 + 20 sales cash - 20 refund
+        // + 10 in - 5 out + 15 abono. The canceled sale nets to zero, it is not
+        // subtracted twice.
+        assert_eq!(snapshot.expected_cash, 160.0);
         assert_eq!(snapshot.refunds.len(), 1);
         assert_eq!(snapshot.credit_payments.len(), 1);
         assert_eq!(snapshot.payment_breakdown.iter().find(|payment| payment.method == "cash").map(|payment| payment.amount), Some(40.0));

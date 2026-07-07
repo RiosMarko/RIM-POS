@@ -1800,9 +1800,8 @@ kbd {
 .catalog-row:not(.table-head):hover,
 .inventory-row:not(.table-head):hover,
 .purchase-row:not(.table-head):hover,
-.invoice-row:not(.table-head):hover,
-.history-view .sale-row {
-  grid-template-columns: minmax(120px, 1fr) 120px 160px 100px 210px 100px 110px;
+.invoice-row:not(.table-head):hover {
+  background: var(--surface-soft);
 }
 
 .history-tabs {
@@ -2360,6 +2359,24 @@ kbd {
   color: oklch(0.18 0.02 145);
   font: 800 0.78rem/1.42 "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   white-space: pre;
+}
+
+.ticket-card-note {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.ticket-card-note span {
+  color: var(--muted);
+  font-weight: 750;
+  font-size: 0.8rem;
+}
+
+.ticket-preview.card-voucher {
+  min-height: 0;
+  max-height: none;
+  resize: none;
 }
 
 .settings-side {

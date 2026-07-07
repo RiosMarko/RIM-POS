@@ -37,6 +37,7 @@ export function SettingsView({
   const [ticketStartLines, setTicketStartLines] = useState(0);
   const [ticketExtraLines, setTicketExtraLines] = useState(3);
   const [ticketCopies, setTicketCopies] = useState(1);
+  const [ticketEscpos, setTicketEscpos] = useState(true);
   const [ticketPreviewDraft, setTicketPreviewDraft] = useState("");
   const [ticketPreviewDirty, setTicketPreviewDirty] = useState(false);
   const [cardTerminals, setCardTerminals] = useState<string[]>([]);
@@ -70,6 +71,7 @@ export function SettingsView({
     "ticket_start_lines",
     "ticket_extra_lines",
     "ticket_copies",
+    "ticket_escpos",
   ], []);
 
   const printers = useMemo(() => devices.filter((device) => device.device_type === "printer"), [devices]);
@@ -197,6 +199,7 @@ export function SettingsView({
         setTicketStartLines(Number(nextTicketStartLines ?? 0));
         setTicketExtraLines(Number(nextTicketExtraLines ?? 3));
         setTicketCopies(Number(nextTicketCopies ?? 1));
+        setTicketEscpos(settings.ticket_escpos !== "false");
         onTaxModeChange({ enabled, pricesIncludeTax: nextTaxPricesIncludeTax !== "false" });
       })
       .catch((error) => showToast(String(error)));
@@ -287,6 +290,7 @@ export function SettingsView({
         ticket_start_lines: String(previewSettings?.startLines ?? ticketStartLines),
         ticket_extra_lines: String(previewSettings?.extraLines ?? ticketExtraLines),
         ticket_copies: String(ticketCopies),
+        ticket_escpos: String(ticketEscpos),
       });
       if (previewSettings) {
         setTicketHeader(previewSettings.header);
@@ -364,11 +368,13 @@ export function SettingsView({
       ...(ticketShowCashier ? ["Cajero: Admin"] : []),
       separator,
       "Refresco cola 600 ml",
-      ...(ticketShowBarcode ? ["  750000000001"] : []),
       "  2.000 @ $18.00  $36.00",
+      ...(ticketShowBarcode ? ["  750000000001"] : []),
+      "",
       "Arroz 1 kg",
-      ...(ticketShowBarcode ? ["  750000000002"] : []),
       "  1.000 @ $32.00  $32.00",
+      ...(ticketShowBarcode ? ["  750000000002"] : []),
+      "",
       separator,
       ...(taxShowBreakdown ? ["SUBTOTAL        $58.62", "IMPUESTOS       $9.38"] : []),
       "*** TOTAL       $68.00",
@@ -490,6 +496,19 @@ export function SettingsView({
                   }}
                   aria-label="Editar vista previa del ticket"
                 />
+                <div className="ticket-card-note">
+                  <span>En ventas con tarjeta se agrega al final (no editable):</span>
+                  <pre className="ticket-preview card-voucher">{[
+                    line,
+                    "VENTA A CREDITO",
+                    "FIRMA DEL CLIENTE",
+                    "",
+                    "",
+                    "",
+                    "_".repeat(Math.max(24, Math.min(48, ticketWidth))),
+                    "TERMINAL BANORTE-1",
+                  ].join("\n")}</pre>
+                </div>
                 <button className="ghost-button" type="button" onClick={testPrinter}>
                   Probar impresora
                 </button>
@@ -569,6 +588,13 @@ export function SettingsView({
                       {device.device_type === "serial" ? `Directo por ${deviceLabel(device)}` : deviceLabel(device)}
                     </option>
                   ))}
+                </select>
+              </label>
+              <label>
+                Tipo de impresora ticket
+                <select value={ticketEscpos ? "escpos" : "normal"} onChange={(event) => setTicketEscpos(event.target.value === "escpos")}>
+                  <option value="escpos">Termica ESC/POS (58mm, corta papel)</option>
+                  <option value="normal">Normal con driver (Brother, laser, tinta)</option>
                 </select>
               </label>
               <label>

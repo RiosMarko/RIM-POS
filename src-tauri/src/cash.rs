@@ -1123,6 +1123,27 @@ pub(crate) fn calculate_shift_cut(conn: &Connection, shift_id: i64) -> CommandRe
 
     let raw_cash_paid = payment_totals.get("cash").copied().unwrap_or(0.0);
     let cash_paid = round_money((raw_cash_paid - cash_change).max(0.0));
+
+    // Cash physically taken in across ALL sales of the shift (paid or canceled).
+    // The drawer really received a canceled sale's cash and then handed it back
+    // as a refund, so expected_cash must count that income and subtract the
+    // refund once; using paid-only cash_paid here would double-subtract the
+    // refund and make the cut disagree with the counted drawer.
+    let (raw_cash_all, cash_change_all): (f64, f64) = conn
+        .query_row(
+            "SELECT
+                COALESCE((SELECT SUM(p.amount) FROM payments p
+                          JOIN sales s ON s.id = p.sale_id
+                          WHERE s.shift_id = ?1 AND p.method = 'cash'), 0),
+                COALESCE((SELECT SUM(s.change_due) FROM sales s
+                          WHERE s.shift_id = ?1
+                            AND EXISTS (SELECT 1 FROM payments p WHERE p.sale_id = s.id AND p.method = 'cash')), 0)",
+            params![shift_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| error.to_string())?;
+    let cash_received_all = round_money((raw_cash_all - cash_change_all).max(0.0));
+
     let card_paid = round_money(payment_totals.get("card").copied().unwrap_or(0.0));
     let transfer_paid = round_money(payment_totals.get("transfer").copied().unwrap_or(0.0));
     let credit_sales = round_money(payment_totals.get("credit").copied().unwrap_or(0.0));
@@ -1447,11 +1468,12 @@ pub(crate) fn calculate_shift_cut(conn: &Connection, shift_id: i64) -> CommandRe
     taxes.sort_by(|left, right| right.tax_collected.total_cmp(&left.tax_collected));
 
     let expected_cash = round_money(
-        opening_cash + cash_paid + cash_entries_total - cash_out_total - cash_refunds_total
+        opening_cash + cash_received_all + cash_entries_total - cash_out_total - cash_refunds_total
             + credit_payments_total,
     );
     let counted_income_total = round_money(
-        cash_paid + cash_entries_total - cash_out_total - cash_refunds_total + credit_payments_total,
+        cash_received_all + cash_entries_total - cash_out_total - cash_refunds_total
+            + credit_payments_total,
     );
     let net_sales = round_money(net_sales);
     let closing_cash = closing_cash.map(round_money);
