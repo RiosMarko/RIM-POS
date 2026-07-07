@@ -107,7 +107,7 @@ const ProductRow = memo(function ProductRow({
       <button className="ghost-button row-action" type="button" onClick={() => onEdit(product)}>
         Editar
       </button>
-      <button className="icon-button danger" type="button" onClick={() => onRemove(product)} aria-label={`Desactivar ${product.name}`}>
+      <button className="icon-button danger" type="button" onClick={() => onRemove(product)} aria-label={`Borrar ${product.name}`}>
         <Trash2 size={16} />
       </button>
     </div>
@@ -270,10 +270,12 @@ export function ProductsView({
 
   const deleteProductAsAdmin = useCallback(async (product: Product, actorId: number) => {
     try {
-      await deleteProduct(product.id, actorId);
+      const removed = await deleteProduct(product.id, actorId);
       setCatalogLimit(PRODUCT_PAGE_SIZE);
       await loadCatalog("", PRODUCT_PAGE_SIZE);
-      showToast("Producto desactivado");
+      showToast(removed
+        ? "Producto borrado"
+        : "Producto tiene ventas: se desactivo en vez de borrar");
     } catch (error) {
       showToast(String(error));
     }
@@ -282,10 +284,14 @@ export function ProductsView({
   const deleteProductsAsAdmin = useCallback(async (targetProducts: Product[], actorId: number) => {
     setBusy(true);
     try {
-      await Promise.all(targetProducts.map((product) => deleteProduct(product.id, actorId)));
+      const results = await Promise.all(targetProducts.map((product) => deleteProduct(product.id, actorId)));
       setSelectedProductIds(new Set());
       await loadCatalog(catalogQuery);
-      showToast(`${targetProducts.length} productos borrados`);
+      const removed = results.filter(Boolean).length;
+      const deactivated = results.length - removed;
+      showToast(deactivated > 0
+        ? `${removed} borrados, ${deactivated} desactivados (tienen ventas)`
+        : `${removed} productos borrados`);
     } catch (error) {
       showToast(String(error));
     } finally {
@@ -295,9 +301,9 @@ export function ProductsView({
 
   const remove = useCallback(async (product: Product) => {
     requestConfirm({
-      title: "Desactivar producto",
-      message: `${product.name} deja de salir en busqueda y venta.`,
-      confirmLabel: "Desactivar",
+      title: "Borrar producto",
+      message: `${product.name} se borra de la base de datos. Si tiene ventas registradas solo se desactivara.`,
+      confirmLabel: "Borrar",
       tone: "danger",
       onConfirm: async () => setDeleteAdminDraft(product),
     });
@@ -373,7 +379,7 @@ export function ProductsView({
     }
     requestConfirm({
       title: "Borrar productos",
-      message: `Vas a borrar ${selectedProducts.length} productos. Ya no saldran en busqueda ni venta.`,
+      message: `Vas a borrar ${selectedProducts.length} productos de la base de datos. Los que tengan ventas solo se desactivaran.`,
       confirmLabel: `Borrar ${selectedProducts.length}`,
       tone: "danger",
       onConfirm: async () => setBulkDeleteAdminDraft(selectedProducts),

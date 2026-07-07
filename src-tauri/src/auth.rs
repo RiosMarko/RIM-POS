@@ -29,10 +29,21 @@ pub fn require_active_user(conn: &Connection, actor_id: i64) -> CommandResult<Us
 
 pub fn require_admin(conn: &Connection, actor_id: i64) -> CommandResult<()> {
     let actor = require_active_user(conn, actor_id)?;
-    if actor.role != "admin" {
-        return Err("Permiso admin requerido".into());
+    if actor.role == "admin" {
+        return Ok(());
     }
-    Ok(())
+    // A trusted cashier granted the 'admin' access permission also passes.
+    let elevated: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM user_permissions WHERE user_id = ?1 AND permission_key = 'admin'",
+            params![actor_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if elevated > 0 {
+        return Ok(());
+    }
+    Err("Permiso admin requerido".into())
 }
 
 pub fn ensure_admin_remains(
@@ -78,6 +89,10 @@ mod tests {
               role TEXT NOT NULL,
               active INTEGER NOT NULL
             );
+            CREATE TABLE user_permissions (
+              user_id INTEGER NOT NULL,
+              permission_key TEXT NOT NULL
+            );
             ",
         )
         .unwrap();
@@ -109,6 +124,18 @@ mod tests {
             require_admin(&conn, 2).unwrap_err(),
             "Permiso admin requerido"
         );
+    }
+
+    #[test]
+    fn require_admin_accepts_cashier_with_admin_permission() {
+        let conn = test_conn();
+        assert!(require_admin(&conn, 2).is_err());
+        conn.execute(
+            "INSERT INTO user_permissions (user_id, permission_key) VALUES (2, 'admin')",
+            [],
+        )
+        .unwrap();
+        assert!(require_admin(&conn, 2).is_ok());
     }
 
     #[test]

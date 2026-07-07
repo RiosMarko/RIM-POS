@@ -16,7 +16,7 @@ export function CustomersPurchasesView({
   showToast: (message: string) => void;
   requestConfirm: (draft: ConfirmDraft) => void;
 }) {
-  const isAdmin = session.role === "admin";
+  const isAdmin = session.role === "admin" || session.permissions.includes("admin");
   const canViewCustomers = isAdmin || hasPermission(session.permissions, "customers");
   const canViewPurchases = isAdmin || hasPermission(session.permissions, "purchases");
   const [tab, setTab] = useState<SubTab>(canViewCustomers ? "customers" : "purchases");

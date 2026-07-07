@@ -540,6 +540,232 @@ pub(crate) fn sale_list(
         .map_err(|error| error.to_string())
 }
 
+/// Item-level sales history: one row per product sold, with its ticket folio,
+/// date and cashier. Filtered to a single local day when `day` is provided
+/// (YYYY-MM-DD); otherwise returns the most recent lines. Only paid sales.
+#[tauri::command]
+pub(crate) fn sale_line_history(
+    state: State<'_, AppState>,
+    actor_id: i64,
+    day: Option<String>,
+    limit: Option<i64>,
+) -> CommandResult<Vec<SaleLineHistory>> {
+    let limit = limit.unwrap_or(500).clamp(1, 2000);
+    let conn = state.db.lock().map_err(|error| error.to_string())?;
+    require_active_user(&conn, actor_id)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT s.id, si.id, s.folio, s.created_at, s.cashier_id, u.name,
+                    (SELECT CASE
+                       WHEN COUNT(*) = 0 THEN 'Sin pago'
+                       WHEN COUNT(DISTINCT pm.method) > 1 THEN 'Mixto'
+                       WHEN MAX(pm.method) = 'cash' THEN 'Efectivo'
+                       WHEN MAX(pm.method) = 'card' THEN 'Tarjeta'
+                       WHEN MAX(pm.method) = 'transfer' THEN 'Transferencia'
+                       WHEN MAX(pm.method) = 'credit' THEN 'Credito'
+                       ELSE 'Otro' END
+                     FROM payments pm WHERE pm.sale_id = s.id),
+                    si.product_id, COALESCE(p.name, 'Producto eliminado'), COALESCE(p.unit, 'pieza'),
+                    si.quantity,
+                    COALESCE((SELECT SUM(r.quantity) FROM sale_returns r WHERE r.sale_item_id = si.id), 0),
+                    si.unit_price, si.discount, si.line_total,
+                    CASE WHEN s.status = 'paid' AND cs.status = 'open' THEN 1 ELSE 0 END
+             FROM sale_items si
+             JOIN sales s ON s.id = si.sale_id
+             JOIN users u ON u.id = s.cashier_id
+             LEFT JOIN products p ON p.id = si.product_id
+             LEFT JOIN cash_sessions cs ON cs.id = s.cash_session_id
+             WHERE s.status = 'paid'
+               AND (?1 IS NULL OR date(s.created_at, 'localtime') = date(?1))
+             ORDER BY s.id DESC, si.id ASC
+             LIMIT ?2",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map(params![day, limit], |row| {
+            Ok(SaleLineHistory {
+                sale_id: row.get(0)?,
+                sale_item_id: row.get(1)?,
+                folio: row.get(2)?,
+                created_at: row.get(3)?,
+                cashier_id: row.get(4)?,
+                cashier_name: row.get(5)?,
+                payment_method: row.get(6)?,
+                product_id: row.get(7)?,
+                product_name: row.get(8)?,
+                unit: row.get(9)?,
+                quantity: row.get(10)?,
+                returned_quantity: row.get(11)?,
+                unit_price: row.get(12)?,
+                discount: row.get(13)?,
+                line_total: row.get(14)?,
+                returnable: row.get::<_, i64>(15)? == 1,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+/// Partial return of a single sold line. Restores stock, records the refund
+/// (so the cash cut reflects it) and adjusts the open cash session/shift.
+/// Keeps the original sale/sale_items intact for history.
+#[tauri::command]
+pub(crate) fn sale_item_return(
+    state: State<'_, AppState>,
+    actor_id: i64,
+    sale_item_id: i64,
+    quantity: f64,
+    reason: String,
+) -> CommandResult<()> {
+    let mut conn = state.db.lock().map_err(|error| error.to_string())?;
+    return_sale_item_with_conn(&mut conn, actor_id, sale_item_id, quantity, reason)
+}
+
+pub(crate) fn return_sale_item_with_conn(
+    conn: &mut Connection,
+    actor_id: i64,
+    sale_item_id: i64,
+    quantity: f64,
+    reason: String,
+) -> CommandResult<()> {
+    if reason.trim().len() < 2 {
+        return Err("Motivo requerido".into());
+    }
+    if !(quantity > 0.0) {
+        return Err("Cantidad a devolver invalida".into());
+    }
+    require_admin(conn, actor_id)?;
+    let tx = conn.transaction().map_err(|error| error.to_string())?;
+
+    let (sale_id, product_id, sold_qty, line_total, status, cash_session_id, shift_id, created_at): (
+        i64,
+        i64,
+        f64,
+        f64,
+        String,
+        Option<i64>,
+        Option<i64>,
+        String,
+    ) = tx
+        .query_row(
+            "SELECT si.sale_id, si.product_id, si.quantity, si.line_total,
+                    s.status, s.cash_session_id, s.shift_id, s.created_at
+             FROM sale_items si JOIN sales s ON s.id = si.sale_id
+             WHERE si.id = ?1",
+            params![sale_item_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            },
+        )
+        .map_err(|_| "Producto de venta no encontrado".to_string())?;
+
+    if status != "paid" {
+        return Err("La venta no esta activa".into());
+    }
+    if let Some(session_id) = cash_session_id {
+        let session_status: String = tx
+            .query_row(
+                "SELECT status FROM cash_sessions WHERE id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| "Turno de venta no encontrado".to_string())?;
+        if session_status != "open" {
+            return Err("Venta de corte cerrado: registra la devolucion en el turno actual".into());
+        }
+    }
+    if setting_bool(&tx, "period_lock_enabled", false)? {
+        let period = period_key(&created_at)?;
+        let locked: Option<String> = tx
+            .query_row(
+                "SELECT month FROM locked_periods WHERE month = ?1",
+                params![period],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if locked.is_some() {
+            return Err("Periodo bloqueado: no se puede devolver venta retroactiva".into());
+        }
+    }
+
+    let already_returned: f64 = tx
+        .query_row(
+            "SELECT COALESCE(SUM(quantity), 0) FROM sale_returns WHERE sale_item_id = ?1",
+            params![sale_item_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let remaining = sold_qty - already_returned;
+    // Small epsilon for float/weight quantities.
+    if quantity > remaining + 1e-6 {
+        return Err(format!("Solo quedan {:.3} por devolver", remaining));
+    }
+
+    let unit_effective = if sold_qty > 0.0 { line_total / sold_qty } else { 0.0 };
+    let refund_total = round_money(unit_effective * quantity);
+    let cash_refund = refund_total;
+    let now = now_iso();
+
+    tx.execute(
+        "UPDATE products SET stock = stock + ?1, updated_at = ?2 WHERE id = ?3",
+        params![quantity, now, product_id],
+    )
+    .map_err(|error| error.to_string())?;
+    tx.execute(
+        "INSERT INTO inventory_movements (product_id, movement_type, quantity, reason, reference_id, created_at)
+         VALUES (?1, 'return', ?2, ?3, ?4, ?5)",
+        params![product_id, quantity, reason.trim(), sale_id, now],
+    )
+    .map_err(|error| error.to_string())?;
+    tx.execute(
+        "INSERT INTO sale_returns (sale_id, sale_item_id, product_id, quantity, refund_total, cash_refund, reason, actor_id, cash_session_id, shift_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![sale_id, sale_item_id, product_id, quantity, refund_total, cash_refund, reason.trim(), actor_id, cash_session_id, shift_id, now],
+    )
+    .map_err(|error| error.to_string())?;
+
+    if let Some(session_id) = cash_session_id {
+        tx.execute(
+            "UPDATE cash_sessions
+             SET sales_total = MAX(0, sales_total - ?1), expected_cash = expected_cash - ?2
+             WHERE id = ?3 AND status = 'open'",
+            params![refund_total, cash_refund, session_id],
+        )
+        .map_err(|error| error.to_string())?;
+        if let Some(shift_id) = shift_id {
+            tx.execute(
+                "UPDATE shifts SET expected_cash = expected_cash - ?1 WHERE id = ?2 AND status = 'open'",
+                params![cash_refund, shift_id],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+    }
+    tx.execute(
+        "INSERT INTO audit_log (actor_id, action, entity, entity_id, details, created_at)
+         VALUES (?1, 'return', 'sale_item', ?2, ?3, ?4)",
+        params![
+            actor_id,
+            sale_item_id,
+            format!("Devolucion {:.3} · {}", quantity, reason.trim()),
+            now
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    tx.commit().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 pub(crate) fn cancel_sale_with_conn(
     conn: &mut Connection,
     sale_id: i64,

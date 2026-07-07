@@ -10,7 +10,8 @@ export type ViewKey =
   | "invoices"
   | "users"
   | "settings"
-  | "administration";
+  | "administration"
+  | "history";
 
 export type NavItem<IconType> = {
   key: ViewKey;
@@ -27,6 +28,7 @@ export const userPermissionOptions: Array<{ key: PermissionKey; label: string; d
   { key: "reports", label: "Reportes", description: "Ventas, movimientos y reportes mensuales" },
   { key: "purchases", label: "Compras", description: "Proveedores, entradas y costos" },
   { key: "view_profit", label: "Ver ganancia", description: "Permite ver margen y utilidad en cortes y reportes" },
+  { key: "admin", label: "Administrador", description: "Da acceso total: todos los modulos y acciones de admin, sin cambiar el rol" },
 ];
 
 export const allUserPermissions = userPermissionOptions.map((option) => option.key);

@@ -25,6 +25,7 @@ import {
   ShortcutHelp,
   TicketNameModal,
   UnexpectedShutdownModal,
+  WeightPromptModal,
 } from "./features/sales/SaleModals";
 import { SaleView } from "./features/sales/SaleView";
 import { useClock } from "./hooks/useClock";
@@ -130,6 +131,7 @@ function App() {
   const [confirmDraft, setConfirmDraft] = useState<ConfirmDraft | null>(null);
   const [numberPromptDraft, setNumberPromptDraft] = useState<NumberPromptDraft | null>(null);
   const [selectedCartProductId, setSelectedCartProductId] = useState<number | null>(null);
+  const [weightPromptProduct, setWeightPromptProduct] = useState<Product | null>(null);
   const [taxEnabled, setTaxEnabled] = useState(true);
   const [pricesIncludeTax, setPricesIncludeTax] = useState(true);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -139,7 +141,7 @@ function App() {
   const saleProductSearchRequestRef = useRef(0);
   const adminProductSearchRequestRef = useRef(0);
 
-  const isAdmin = session?.role === "admin";
+  const isAdmin = session?.role === "admin" || Boolean(session?.permissions.includes("admin"));
   const {
     currentView,
     authorizedAdminView,
@@ -323,6 +325,16 @@ function App() {
     searchRef.current?.focus();
   }, [cart, showToast]);
 
+  // Products sold by weight/volume (unit != "pieza") open a quick amount prompt
+  // instead of adding 1 unit directly, so the cashier types the kg/litros scanned.
+  const requestAddProduct = useCallback((product: Product, quantity?: number) => {
+    if (quantity === undefined && product.unit !== "pieza") {
+      setWeightPromptProduct(product);
+      return;
+    }
+    addProduct(product, quantity ?? 1);
+  }, [addProduct]);
+
   const updateLine = useCallback((productId: number, patch: Partial<Pick<CartLine, "quantity" | "discount">>) => {
     setCart((current) =>
       current
@@ -372,7 +384,7 @@ function App() {
     const result = await searchProducts(query);
     if (requestId !== saleProductSearchRequestRef.current) return;
     setSaleProducts(result);
-    if (query.trim() && result.length === 1) addProduct(result[0]);
+    if (query.trim() && result.length === 1) requestAddProduct(result[0]);
   };
 
   const completeSale = async (options: { printTicket?: boolean } = {}) => {
@@ -1012,7 +1024,7 @@ function App() {
               setSelectedCardTerminal={setSelectedCardTerminal}
               refreshProducts={refreshSaleProducts}
               submitSearch={submitSearch}
-              addProduct={addProduct}
+              addProduct={requestAddProduct}
               updateLine={updateLine}
               selectCartLine={setSelectedCartProductId}
               completeSale={completeSale}
@@ -1053,6 +1065,19 @@ function App() {
             onClose={() => setHeldTicketsOpen(false)}
             onRecover={recoverHeldTicket}
             onDelete={(ticket) => setTicketDeleteDraft(ticket)}
+          />
+        )}
+        {weightPromptProduct && (
+          <WeightPromptModal
+            product={weightPromptProduct}
+            onCancel={() => {
+              setWeightPromptProduct(null);
+              searchRef.current?.focus();
+            }}
+            onConfirm={(quantity) => {
+              addProduct(weightPromptProduct, quantity);
+              setWeightPromptProduct(null);
+            }}
           />
         )}
         {ticketNameDraft && (

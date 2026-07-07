@@ -96,6 +96,25 @@ export type SaleReceipt = {
   created_at: string;
 };
 
+export type SaleLineHistory = {
+  sale_id: number;
+  sale_item_id: number;
+  folio: string;
+  created_at: string;
+  cashier_id: number;
+  cashier_name: string;
+  payment_method: string;
+  product_id: number;
+  product_name: string;
+  unit: string;
+  quantity: number;
+  returned_quantity: number;
+  unit_price: number;
+  discount: number;
+  line_total: number;
+  returnable: boolean;
+};
+
 export type SaleListItem = {
   id: number;
   folio: string;
@@ -474,7 +493,8 @@ export type PermissionKey =
   | "reports"
   | "purchases"
   | "invoices"
-  | "view_profit";
+  | "view_profit"
+  | "admin";
 
 export type UserSession = {
   id: number;

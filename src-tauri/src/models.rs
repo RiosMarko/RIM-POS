@@ -273,6 +273,27 @@ pub(crate) struct MonthlySalesReport {
 }
 
 #[derive(Debug, Serialize)]
+pub(crate) struct SaleLineHistory {
+    pub(crate) sale_id: i64,
+    pub(crate) sale_item_id: i64,
+    pub(crate) folio: String,
+    pub(crate) created_at: String,
+    pub(crate) cashier_id: i64,
+    pub(crate) cashier_name: String,
+    pub(crate) payment_method: String,
+    pub(crate) product_id: i64,
+    pub(crate) product_name: String,
+    pub(crate) quantity: f64,
+    pub(crate) returned_quantity: f64,
+    pub(crate) unit: String,
+    pub(crate) unit_price: f64,
+    pub(crate) discount: f64,
+    pub(crate) line_total: f64,
+    // true solo si la venta esta pagada y su turno sigue abierto (devolucion directa).
+    pub(crate) returnable: bool,
+}
+
+#[derive(Debug, Serialize)]
 pub(crate) struct SaleListItem {
     pub(crate) id: i64,
     pub(crate) folio: String,
@@ -506,6 +527,9 @@ pub(crate) const USER_PERMISSION_KEYS: &[&str] = &[
     "purchases",
     "invoices",
     "view_profit",
+    // Elevates a trusted cashier to admin-level access (grants every permission
+    // and admin-only actions) without changing their role.
+    "admin",
 ];
 
 #[derive(Debug, Deserialize)]

@@ -7,6 +7,7 @@ import type { DashboardSummary, Product, UserSession } from "../../types";
 const AdministrationView = lazy(() => import("./AdministrationView").then((module) => ({ default: module.AdministrationView })));
 const CashView = lazy(() => import("../cash/CashView").then((module) => ({ default: module.CashView })));
 const CustomersPurchasesView = lazy(() => import("../customers/CustomersPurchasesView").then((module) => ({ default: module.CustomersPurchasesView })));
+const HistoryReturnsView = lazy(() => import("../history/HistoryReturnsView").then((module) => ({ default: module.HistoryReturnsView })));
 const InventoryView = lazy(() => import("../inventory/InventoryView").then((module) => ({ default: module.InventoryView })));
 const InvoicesView = lazy(() => import("../invoices/InvoicesView").then((module) => ({ default: module.InvoicesView })));
 const ProductsView = lazy(() => import("../products/ProductsView").then((module) => ({ default: module.ProductsView })));
@@ -18,6 +19,7 @@ export function preloadAdminViews() {
   void import("./AdministrationView");
   void import("../cash/CashView");
   void import("../customers/CustomersPurchasesView");
+  void import("../history/HistoryReturnsView");
   void import("../inventory/InventoryView");
   void import("../invoices/InvoicesView");
   void import("../products/ProductsView");
@@ -64,7 +66,7 @@ export function AdminView({
         session={session}
         cashSession={cashSession ?? null}
         tickets={summary?.today_tickets ?? 0}
-        canViewProfit={session.role === "admin" || session.permissions.includes("view_profit")}
+        canViewProfit={session.role === "admin" || session.permissions.includes("admin") || session.permissions.includes("view_profit")}
         openCash={openCash}
         refreshSummary={refreshSummary}
         showToast={showToast}
@@ -76,6 +78,8 @@ export function AdminView({
   else if (view === "reports") content = <ReportsView showToast={showToast} />;
 
   else if (view === "invoices") content = <InvoicesView showToast={showToast} />;
+
+  else if (view === "history") content = <HistoryReturnsView showToast={showToast} />;
 
   else if (view === "settings") content = <SettingsView showToast={showToast} onTaxModeChange={onTaxModeChange} />;
   else if (view === "administration") content = <AdministrationView showToast={showToast} />;

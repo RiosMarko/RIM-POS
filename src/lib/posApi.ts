@@ -30,6 +30,7 @@ import type {
   ProductSalesReport,
   ReportMovement,
   ReportSummary,
+  SaleLineHistory,
   SaleListItem,
   SaleReceipt,
   ScaleReading,
@@ -177,7 +178,7 @@ let mockCashSession: CashSession | null = {
   sales_total: 0,
   status: "open",
 };
-const allMockPermissions: PermissionKey[] = ["products", "inventory", "customers", "reports", "purchases", "invoices", "view_profit"];
+const allMockPermissions: PermissionKey[] = ["products", "inventory", "customers", "reports", "purchases", "invoices", "view_profit", "admin"];
 
 let mockUsers: UserAccount[] = [
   {
@@ -378,11 +379,14 @@ export async function validateProductImport(rows: ProductImportRow[]): Promise<P
   return { imported: 0, created: rows.length - issues.length, updated: 0, failed: issues.length, committed: false, issues };
 }
 
-export async function deleteProduct(id: number, actorId?: number): Promise<void> {
+// Resolves true when the product was removed from the DB, false when it was
+// only deactivated because it still has sales/purchase history.
+export async function deleteProduct(id: number, actorId?: number): Promise<boolean> {
   if (isTauri()) {
-    return call<void>("product_delete", { actorId: actorId ?? requireActorId(), id });
+    return call<boolean>("product_delete", { actorId: actorId ?? requireActorId(), id });
   }
-  demoProducts = demoProducts.map((product) => (product.id === id ? { ...product, active: false } : product));
+  demoProducts = demoProducts.filter((product) => product.id !== id);
+  return true;
 }
 
 export async function adjustInventory(input: { product_id: number; quantity: number; reason: string }): Promise<Product> {
@@ -838,6 +842,28 @@ export async function listSales(): Promise<SaleListItem[]> {
     return call<SaleListItem[]>("sale_list", { actorId: requireActorId(), limit: 80 });
   }
   return mockSales;
+}
+
+export async function listSaleLineHistory(input: { day?: string; limit?: number } = {}): Promise<SaleLineHistory[]> {
+  if (isTauri()) {
+    return call<SaleLineHistory[]>("sale_line_history", {
+      actorId: requireActorId(),
+      day: input.day ?? null,
+      limit: input.limit ?? 500,
+    });
+  }
+  return [];
+}
+
+export async function returnSaleItem(input: { sale_item_id: number; quantity: number; actor_id: number; reason: string }): Promise<void> {
+  if (isTauri()) {
+    return call<void>("sale_item_return", {
+      actorId: input.actor_id,
+      saleItemId: input.sale_item_id,
+      quantity: input.quantity,
+      reason: input.reason,
+    });
+  }
 }
 
 export async function cancelSale(input: { sale_id: number; actor_id: number; reason: string }): Promise<void> {

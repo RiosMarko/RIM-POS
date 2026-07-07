@@ -16,10 +16,11 @@ pub(crate) fn monthly_sales_report(
         "SELECT
             strftime('%Y-%m', s.created_at, 'localtime') AS month,
             SUM(CASE WHEN s.status = 'paid' THEN 1 ELSE 0 END) AS total_tickets,
-            COALESCE(SUM(CASE WHEN s.status = 'paid' THEN s.total ELSE 0 END), 0) AS total_amount,
+            COALESCE(SUM(CASE WHEN s.status = 'paid' THEN s.total - COALESCE(r.rt, 0) ELSE 0 END), 0) AS total_amount,
             SUM(CASE WHEN s.status = 'canceled' THEN 1 ELSE 0 END) AS canceled_tickets
          FROM sales s
          JOIN shifts sh ON sh.id = s.shift_id
+         LEFT JOIN (SELECT sale_id, SUM(refund_total) AS rt FROM sale_returns GROUP BY sale_id) r ON r.sale_id = s.id
          WHERE sh.status = 'closed'",
     );
     if month.is_some() {
@@ -59,7 +60,12 @@ pub(crate) fn report_summary(state: State<'_, AppState>, actor_id: i64) -> Comma
     let workstation_id = current_workstation_id(&conn)?;
     let (today_sales, today_tickets): (f64, i64) = conn
         .query_row(
-            "SELECT COALESCE(SUM(total), 0), COUNT(*)
+            "SELECT COALESCE(SUM(total), 0) - COALESCE((
+                      SELECT SUM(r.refund_total)
+                      FROM sale_returns r JOIN sales s2 ON s2.id = r.sale_id
+                      WHERE date(s2.created_at, 'localtime') = date('now', 'localtime') AND s2.status = 'paid'
+                    ), 0),
+                    COUNT(*)
              FROM sales
              WHERE date(created_at, 'localtime') = date('now', 'localtime') AND status = 'paid'",
             [],
@@ -68,7 +74,13 @@ pub(crate) fn report_summary(state: State<'_, AppState>, actor_id: i64) -> Comma
         .map_err(|error| error.to_string())?;
     let gross_profit = conn
         .query_row(
-            "SELECT COALESCE(SUM((si.unit_price - p.cost) * si.quantity - si.discount), 0)
+            "SELECT COALESCE(SUM((si.unit_price - p.cost) * si.quantity - si.discount), 0) - COALESCE((
+                      SELECT SUM(r.refund_total - p2.cost * r.quantity)
+                      FROM sale_returns r
+                      JOIN products p2 ON p2.id = r.product_id
+                      JOIN sales s2 ON s2.id = r.sale_id
+                      WHERE date(s2.created_at, 'localtime') = date('now', 'localtime') AND s2.status = 'paid'
+                    ), 0)
              FROM sale_items si
              JOIN sales s ON s.id = si.sale_id
              JOIN products p ON p.id = si.product_id
@@ -89,7 +101,11 @@ pub(crate) fn report_summary(state: State<'_, AppState>, actor_id: i64) -> Comma
     let (cash_sales, card_sales, transfer_sales): (f64, f64, f64) = conn
         .query_row(
             "SELECT
-                COALESCE(SUM(CASE WHEN p.method = 'cash' THEN p.amount ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN p.method = 'cash' THEN p.amount ELSE 0 END), 0) - COALESCE((
+                  SELECT SUM(r.cash_refund)
+                  FROM sale_returns r JOIN sales s2 ON s2.id = r.sale_id
+                  WHERE date(s2.created_at, 'localtime') = date('now', 'localtime') AND s2.status = 'paid'
+                ), 0),
                 COALESCE(SUM(CASE WHEN p.method = 'card' THEN p.amount ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN p.method = 'transfer' THEN p.amount ELSE 0 END), 0)
              FROM payments p
@@ -141,9 +157,24 @@ pub(crate) fn report_product_sales(
                p.id,
                p.name,
                p.category,
-               COALESCE(SUM(si.quantity), 0),
-               COALESCE(SUM(si.line_total), 0),
-               COALESCE(SUM(si.line_total - (p.cost * si.quantity)), 0)
+               COALESCE(SUM(si.quantity), 0) - COALESCE((
+                 SELECT SUM(r.quantity) FROM sale_returns r JOIN sales sr ON sr.id = r.sale_id
+                 WHERE r.product_id = p.id AND sr.status = 'paid'
+                   AND (?2 IS NULL OR date(sr.created_at, 'localtime') >= date(?2))
+                   AND (?3 IS NULL OR date(sr.created_at, 'localtime') <= date(?3))
+               ), 0),
+               COALESCE(SUM(si.line_total), 0) - COALESCE((
+                 SELECT SUM(r.refund_total) FROM sale_returns r JOIN sales sr ON sr.id = r.sale_id
+                 WHERE r.product_id = p.id AND sr.status = 'paid'
+                   AND (?2 IS NULL OR date(sr.created_at, 'localtime') >= date(?2))
+                   AND (?3 IS NULL OR date(sr.created_at, 'localtime') <= date(?3))
+               ), 0),
+               COALESCE(SUM(si.line_total - (p.cost * si.quantity)), 0) - COALESCE((
+                 SELECT SUM(r.refund_total - p.cost * r.quantity) FROM sale_returns r JOIN sales sr ON sr.id = r.sale_id
+                 WHERE r.product_id = p.id AND sr.status = 'paid'
+                   AND (?2 IS NULL OR date(sr.created_at, 'localtime') >= date(?2))
+                   AND (?3 IS NULL OR date(sr.created_at, 'localtime') <= date(?3))
+               ), 0)
              FROM sale_items si
              JOIN sales s ON s.id = si.sale_id
              JOIN products p ON p.id = si.product_id
@@ -228,23 +259,30 @@ pub(crate) fn report_tax_breakdown(
     let mut stmt = conn
         .prepare(
             "SELECT
-               si.tax_rate,
+               x.tax_rate,
                COALESCE(SUM(CASE
-                 WHEN si.tax_rate > 0 THEN si.line_total / (1 + si.tax_rate)
-                 ELSE si.line_total
+                 WHEN x.tax_rate > 0 THEN x.line_total / (1 + x.tax_rate)
+                 ELSE x.line_total
                END), 0) AS taxable_sales,
                COALESCE(SUM(CASE
-                 WHEN si.tax_rate > 0 THEN si.line_total - (si.line_total / (1 + si.tax_rate))
+                 WHEN x.tax_rate > 0 THEN x.line_total - (x.line_total / (1 + x.tax_rate))
                  ELSE 0
                END), 0) AS tax_collected,
-               COALESCE(SUM(si.line_total), 0) AS gross_sales
-             FROM sale_items si
-             JOIN sales s ON s.id = si.sale_id
-             WHERE s.status = 'paid'
-               AND (?1 IS NULL OR date(s.created_at, 'localtime') >= date(?1))
-               AND (?2 IS NULL OR date(s.created_at, 'localtime') <= date(?2))
-             GROUP BY si.tax_rate
-             ORDER BY si.tax_rate DESC",
+               COALESCE(SUM(x.line_total), 0) AS gross_sales
+             FROM (
+               SELECT si.tax_rate AS tax_rate, si.line_total AS line_total, s.created_at AS created_at, s.status AS status
+               FROM sale_items si JOIN sales s ON s.id = si.sale_id
+               UNION ALL
+               SELECT sitm.tax_rate, -r.refund_total, s.created_at, s.status
+               FROM sale_returns r
+               JOIN sale_items sitm ON sitm.id = r.sale_item_id
+               JOIN sales s ON s.id = r.sale_id
+             ) x
+             WHERE x.status = 'paid'
+               AND (?1 IS NULL OR date(x.created_at, 'localtime') >= date(?1))
+               AND (?2 IS NULL OR date(x.created_at, 'localtime') <= date(?2))
+             GROUP BY x.tax_rate
+             ORDER BY x.tax_rate DESC",
         )
         .map_err(|error| error.to_string())?;
     let rows = stmt

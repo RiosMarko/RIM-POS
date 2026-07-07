@@ -1,4 +1,4 @@
-import { LockKeyhole, LogOut, ShoppingCart } from "lucide-react";
+import { History, LockKeyhole, LogOut, ShoppingCart } from "lucide-react";
 import type { ReactNode } from "react";
 import rimPosLogo from "../../assets/rim-pos-icon.png";
 import { formatLongDateMx } from "../../lib/date";
@@ -78,7 +78,7 @@ export function AppShell({
         <main className="workspace">
           <header className="topbar">
             <div>
-              <h1>{navItems.find((item) => item.key === currentView)?.label}</h1>
+              <h1>{navItems.find((item) => item.key === currentView)?.label ?? (currentView === "history" ? "Historial y Devoluciones" : "")}</h1>
               <p>{summary ? `${summary.today_tickets} tickets hoy, ${money(summary.today_sales)} vendidos` : "Cargando caja"}</p>
             </div>
             <div className="top-actions">
@@ -91,6 +91,14 @@ export function AppShell({
           <footer className="status-clock" aria-live="polite">
             <span>{formatLongDateMx(clock)}</span>
             <strong>{clock.toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</strong>
+            <button
+              className={`status-clock-action ${currentView === "history" ? "active" : ""}`}
+              type="button"
+              onClick={() => requestView("history")}
+            >
+              <History size={16} strokeWidth={2} />
+              Historial y Devoluciones
+            </button>
           </footer>
         </main>
       </div>

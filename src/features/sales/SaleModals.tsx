@@ -1,8 +1,8 @@
-import { AlertTriangle, Archive, Ticket, Trash2 } from "lucide-react";
+import { AlertTriangle, Archive, Scale, Ticket, Trash2 } from "lucide-react";
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { formatDateTimeMx } from "../../lib/date";
 import { money } from "../../lib/money";
-import type { ActiveSaleDraft, HeldTicket } from "../../types";
+import type { ActiveSaleDraft, HeldTicket, Product } from "../../types";
 
 export const functionKeys = [
   { key: "F1", label: "Ticket", title: "Cobrar e imprimir ticket" },
@@ -18,6 +18,72 @@ export const functionKeys = [
   { key: "F11", label: "Mayoreo", compactLabel: true, title: "Aplicar precio de mayoreo" },
   { key: "F12", label: "Admin", title: "Abrir Configuracion" },
 ];
+
+export function WeightPromptModal({
+  product,
+  onCancel,
+  onConfirm,
+}: {
+  product: Product;
+  onCancel: () => void;
+  onConfirm: (quantity: number) => void;
+}) {
+  const [value, setValue] = useState("1");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    window.setTimeout(() => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }, 40);
+  }, []);
+
+  const quantity = Number(value.replace(",", "."));
+  const valid = Number.isFinite(quantity) && quantity > 0;
+  const total = valid ? product.price * quantity : 0;
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    if (valid) onConfirm(quantity);
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="ticket-name-modal weight-prompt-modal" role="dialog" aria-modal="true" aria-label={`Cantidad de ${product.name}`}>
+        <div className="modal-title">
+          <Scale size={22} />
+          <div>
+            <h2>{product.name}</h2>
+            <p>Precio por {product.unit}: {money(product.price)}</p>
+          </div>
+        </div>
+        <form className="dialog-form" onSubmit={submit}>
+          <label>
+            Cantidad ({product.unit})
+            <input
+              ref={inputRef}
+              value={value}
+              onChange={(event) => setValue(event.target.value)}
+              inputMode="decimal"
+            />
+          </label>
+          <div className="weight-prompt-total">
+            <span>Total</span>
+            <strong>{money(total)}</strong>
+          </div>
+          <div className="modal-actions">
+            <button className="ghost-button" type="button" onClick={onCancel}>
+              Cancelar
+            </button>
+            <button className="primary-button" type="submit" disabled={!valid}>
+              Agregar
+            </button>
+          </div>
+        </form>
+      </section>
+    </div>
+  );
+}
 
 export function ShortcutHelp({ onClose }: { onClose: () => void }) {
   return (

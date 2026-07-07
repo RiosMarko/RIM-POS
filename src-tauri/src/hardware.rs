@@ -618,6 +618,77 @@ fn ps_single_quote(value: &str) -> String {
     value.replace('\'', "''")
 }
 
+// C# helper (single-quoted here-string so its double quotes stay literal) that
+// sends bytes to a Windows print spooler with the RAW datatype via winspool.
+#[cfg(windows)]
+const WINDOWS_RAW_PRINT_CSHARP: &str = r#"$src = @'
+using System;
+using System.Runtime.InteropServices;
+public static class RimRawPrint {
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+  public struct DOCINFOW { [MarshalAs(UnmanagedType.LPWStr)] public string pDocName; [MarshalAs(UnmanagedType.LPWStr)] public string pOutputFile; [MarshalAs(UnmanagedType.LPWStr)] public string pDatatype; }
+  [DllImport("winspool.Drv", EntryPoint="OpenPrinterW", SetLastError=true, CharSet=CharSet.Unicode, ExactSpelling=true)] public static extern bool OpenPrinter(string src, out IntPtr hPrinter, IntPtr pd);
+  [DllImport("winspool.Drv", EntryPoint="ClosePrinter", SetLastError=true, ExactSpelling=true)] public static extern bool ClosePrinter(IntPtr hPrinter);
+  [DllImport("winspool.Drv", EntryPoint="StartDocPrinterW", SetLastError=true, CharSet=CharSet.Unicode, ExactSpelling=true)] public static extern bool StartDocPrinter(IntPtr hPrinter, int level, ref DOCINFOW di);
+  [DllImport("winspool.Drv", EntryPoint="EndDocPrinter", SetLastError=true, ExactSpelling=true)] public static extern bool EndDocPrinter(IntPtr hPrinter);
+  [DllImport("winspool.Drv", EntryPoint="StartPagePrinter", SetLastError=true, ExactSpelling=true)] public static extern bool StartPagePrinter(IntPtr hPrinter);
+  [DllImport("winspool.Drv", EntryPoint="EndPagePrinter", SetLastError=true, ExactSpelling=true)] public static extern bool EndPagePrinter(IntPtr hPrinter);
+  [DllImport("winspool.Drv", EntryPoint="WritePrinter", SetLastError=true, ExactSpelling=true)] public static extern bool WritePrinter(IntPtr hPrinter, byte[] pBytes, int dwCount, out int dwWritten);
+  public static void Send(string printerName, byte[] bytes) {
+    IntPtr h;
+    if(!OpenPrinter(printerName, out h, IntPtr.Zero)) throw new Exception("OpenPrinter fallo: " + Marshal.GetLastWin32Error());
+    try {
+      DOCINFOW di = new DOCINFOW(); di.pDocName = "RIM-POS Ticket"; di.pDatatype = "RAW";
+      if(!StartDocPrinter(h, 1, ref di)) throw new Exception("StartDocPrinter fallo: " + Marshal.GetLastWin32Error());
+      try {
+        if(!StartPagePrinter(h)) throw new Exception("StartPagePrinter fallo: " + Marshal.GetLastWin32Error());
+        int written;
+        if(!WritePrinter(h, bytes, bytes.Length, out written)) throw new Exception("WritePrinter fallo: " + Marshal.GetLastWin32Error());
+        EndPagePrinter(h);
+      } finally { EndDocPrinter(h); }
+    } finally { ClosePrinter(h); }
+  }
+}
+'@
+Add-Type -TypeDefinition $src -Language CSharp
+[RimRawPrint]::Send($printer, $bytes)
+"#;
+
+// Sends a file to a Windows spooler queue as RAW (unfiltered) so ESC/POS tickets
+// print at 58mm and cut instead of being re-rendered by the driver to a page.
+#[cfg(windows)]
+fn windows_raw_spool_print(printer: &str, file: &PathBuf) -> CommandResult<()> {
+    let mut script = String::new();
+    script.push_str("$ErrorActionPreference = 'Stop'\n");
+    script.push_str(&format!("$printer = '{}'\n", ps_single_quote(printer)));
+    script.push_str(&format!(
+        "$path = '{}'\n",
+        ps_single_quote(&file.to_string_lossy())
+    ));
+    script.push_str("$bytes = [System.IO.File]::ReadAllBytes($path)\n");
+    script.push_str(WINDOWS_RAW_PRINT_CSHARP);
+
+    let script_file = temp_hardware_file("rim-pos-rawprint", "ps1");
+    fs::write(&script_file, &script)
+        .map_err(|error| format!("No se pudo crear script de impresion: {error}"))?;
+    let script_path = script_file.to_string_lossy().to_string();
+    let args = [
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        script_path.as_str(),
+    ];
+    let output = command_output("powershell", &args, 8000);
+    let _ = fs::remove_file(&script_file);
+    let output = output.map_err(|error| format!("No se pudo imprimir raw: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+}
+
 pub fn run_print_file(printer: &str, file: &PathBuf, raw: bool) -> CommandResult<()> {
     let printer = clean_device_text(printer);
     if printer.is_empty() || printer.starts_with("mock-") {
@@ -637,7 +708,9 @@ pub fn run_print_file(printer: &str, file: &PathBuf, raw: bool) -> CommandResult
     #[cfg(windows)]
     {
         if raw {
-            return Err("Pulso raw de cajon no soportado por PowerShell. Usa impresora ESC/POS compartida por puerto raw.".into());
+            // USB/driver spooler queues can't take raw via Out-Printer, so push
+            // the ESC/POS bytes straight to the spooler with the RAW datatype.
+            return windows_raw_spool_print(&printer, file);
         }
         let path = ps_single_quote(&file.to_string_lossy());
         let printer = ps_single_quote(&printer);

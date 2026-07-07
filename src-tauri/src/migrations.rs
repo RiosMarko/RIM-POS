@@ -297,6 +297,28 @@ pub(crate) fn migrate(conn: &Connection) -> CommandResult<()> {
           FOREIGN KEY(product_id) REFERENCES products(id)
         );
 
+        CREATE TABLE IF NOT EXISTS sale_returns (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          sale_id INTEGER NOT NULL,
+          sale_item_id INTEGER NOT NULL,
+          product_id INTEGER NOT NULL,
+          quantity REAL NOT NULL,
+          refund_total REAL NOT NULL,
+          cash_refund REAL NOT NULL,
+          reason TEXT NOT NULL,
+          actor_id INTEGER NOT NULL,
+          cash_session_id INTEGER,
+          shift_id INTEGER,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(sale_id) REFERENCES sales(id),
+          FOREIGN KEY(sale_item_id) REFERENCES sale_items(id),
+          FOREIGN KEY(product_id) REFERENCES products(id),
+          FOREIGN KEY(actor_id) REFERENCES users(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_sale_returns_shift ON sale_returns(shift_id);
+        CREATE INDEX IF NOT EXISTS idx_sale_returns_item ON sale_returns(sale_item_id);
+
         CREATE TABLE IF NOT EXISTS purchases (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           supplier_id INTEGER,

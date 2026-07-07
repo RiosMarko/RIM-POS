@@ -132,20 +132,24 @@ export function UsersView({ showToast, requestConfirm }: { showToast: (message: 
             <strong>Accesos</strong>
             <span>{role === "admin" ? "Admin tiene todos los accesos." : "Marca modulos extra para este cajero."}</span>
           </div>
-          {userPermissionOptions.map((permission) => (
-            <label key={permission.key}>
-              <input
-                type="checkbox"
-                checked={role === "admin" || permissions.includes(permission.key)}
-                disabled={role === "admin"}
-                onChange={() => togglePermission(permission.key)}
-              />
-              <span>
-                <strong>{permission.label}</strong>
-                <small>{permission.description}</small>
-              </span>
-            </label>
-          ))}
+          {userPermissionOptions.map((permission) => {
+            const hasAdminPerm = permissions.includes("admin");
+            const grantedByAdmin = hasAdminPerm && permission.key !== "admin";
+            return (
+              <label key={permission.key}>
+                <input
+                  type="checkbox"
+                  checked={role === "admin" || grantedByAdmin || permissions.includes(permission.key)}
+                  disabled={role === "admin" || grantedByAdmin}
+                  onChange={() => togglePermission(permission.key)}
+                />
+                <span>
+                  <strong>{permission.label}</strong>
+                  <small>{permission.description}</small>
+                </span>
+              </label>
+            );
+          })}
         </div>
         {editingId && (
           <label>

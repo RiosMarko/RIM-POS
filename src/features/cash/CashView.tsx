@@ -240,9 +240,9 @@ export function CashView({
       setCounts([]);
     }
     setCuts(await listShiftCuts());
-    if (session.role === "admin") setAuditLog(await listAuditLog());
+    if (session.role === "admin" || session.permissions.includes("admin")) setAuditLog(await listAuditLog());
     setSales(await listSales());
-  }, [cashSession, session.role]);
+  }, [cashSession, session.role, session.permissions]);
 
   useEffect(() => {
     refresh().catch((error) => showToast(String(error)));

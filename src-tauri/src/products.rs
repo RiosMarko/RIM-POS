@@ -680,25 +680,63 @@ pub(crate) fn product_bulk_validate(
     })
 }
 
+/// Deletes a product. Returns `true` when the row was removed from the DB, or
+/// `false` when it was only deactivated because it still has sales/purchase
+/// history (hard-deleting those would corrupt reports and break FK integrity).
 #[tauri::command]
-pub(crate) fn product_delete(state: State<'_, AppState>, actor_id: i64, id: i64) -> CommandResult<()> {
-    let conn = state.db.lock().map_err(|error| error.to_string())?;
+pub(crate) fn product_delete(state: State<'_, AppState>, actor_id: i64, id: i64) -> CommandResult<bool> {
+    let mut conn = state.db.lock().map_err(|error| error.to_string())?;
     require_permission(&conn, actor_id, "products")?;
     let name: String = conn
         .query_row("SELECT name FROM products WHERE id = ?1", params![id], |row| row.get(0))
         .map_err(|_| "Producto no encontrado".to_string())?;
-    conn.execute(
-        "UPDATE products SET active = 0, updated_at = ?1 WHERE id = ?2",
-        params![now_iso(), id],
-    )
-    .map_err(|error| error.to_string())?;
-    conn.execute(
+
+    // Sales and purchases reference the product for historical reports, so a
+    // product with transactions can only be deactivated, never hard-deleted.
+    let transactions: i64 = conn
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM sale_items WHERE product_id = ?1)
+                  + (SELECT COUNT(*) FROM purchase_items WHERE product_id = ?1)",
+            params![id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+
+    if transactions > 0 {
+        conn.execute(
+            "UPDATE products SET active = 0, updated_at = ?1 WHERE id = ?2",
+            params![now_iso(), id],
+        )
+        .map_err(|error| error.to_string())?;
+        conn.execute(
+            "INSERT INTO audit_log (actor_id, action, entity, entity_id, details, created_at)
+             VALUES (?1, 'product_delete', 'product', ?2, ?3, ?4)",
+            params![actor_id, id, name, now_iso()],
+        )
+        .map_err(|error| error.to_string())?;
+        return Ok(false);
+    }
+
+    // No transactions: hard delete. Remove dependent rows with no historical
+    // value first so foreign keys don't block the delete.
+    let tx = conn.transaction().map_err(|error| error.to_string())?;
+    for statement in [
+        "DELETE FROM product_taxes WHERE product_id = ?1",
+        "DELETE FROM supplier_products WHERE product_id = ?1",
+        "DELETE FROM price_history WHERE product_id = ?1",
+        "DELETE FROM inventory_movements WHERE product_id = ?1",
+        "DELETE FROM products WHERE id = ?1",
+    ] {
+        tx.execute(statement, params![id]).map_err(|error| error.to_string())?;
+    }
+    tx.execute(
         "INSERT INTO audit_log (actor_id, action, entity, entity_id, details, created_at)
-         VALUES (?1, 'product_delete', 'product', ?2, ?3, ?4)",
+         VALUES (?1, 'product_hard_delete', 'product', ?2, ?3, ?4)",
         params![actor_id, id, name, now_iso()],
     )
     .map_err(|error| error.to_string())?;
-    Ok(())
+    tx.commit().map_err(|error| error.to_string())?;
+    Ok(true)
 }
 
 pub(crate) fn get_product(conn: &Connection, id: i64) -> CommandResult<Product> {

@@ -109,9 +109,11 @@ pub(crate) fn has_permission(conn: &Connection, actor_id: i64, permission: &str)
     if actor.role == "admin" {
         return Ok(true);
     }
+    // The 'admin' permission elevates a cashier to full access, so it satisfies
+    // any specific permission check too.
     let allowed: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM user_permissions WHERE user_id = ?1 AND permission_key = ?2",
+            "SELECT COUNT(*) FROM user_permissions WHERE user_id = ?1 AND permission_key IN (?2, 'admin')",
             params![actor_id, permission],
             |row| row.get(0),
         )
@@ -435,24 +437,53 @@ fn receipt_text(conn: &Connection, sale_id: i64) -> CommandResult<String> {
     Ok(text)
 }
 
+/// Wraps the receipt text in ESC/POS control codes: initialize (ESC @), then the
+/// content, then a feed + partial cut (GS V B). Sent raw to the printer so CUPS
+/// does not re-paginate a 58mm ticket into a full letter-size page (the "tira
+/// larga" bug). Cut bytes are ignored by printers without an auto-cutter.
+fn escpos_ticket_bytes(text: &str, copies: i64) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for _ in 0..copies.max(1) {
+        bytes.extend_from_slice(&[0x1B, 0x40]); // ESC @  -> reset printer
+        bytes.extend_from_slice(text.as_bytes());
+        bytes.extend_from_slice(b"\n\n\n"); // feed before cut
+        bytes.extend_from_slice(&[0x1D, 0x56, 0x42, 0x00]); // GS V B 0 -> feed + partial cut
+    }
+    bytes
+}
+
 #[tauri::command]
 fn print_ticket(state: State<'_, AppState>, sale_id: i64) -> CommandResult<HardwareResult> {
     let conn = state.db.lock().map_err(|error| error.to_string())?;
     let printer = setting_string(&conn, "printer")?.unwrap_or_default();
     let copies = ticket_setting_i64(&conn, "ticket_copies", 1, 1, 4)?;
     let text = receipt_text(&conn, sale_id)?;
-    let text = if copies > 1 {
-        (0..copies)
-            .map(|_| text.clone())
-            .collect::<Vec<_>>()
-            .join("\n")
-    } else {
-        text
-    };
-    let file = temp_hardware_file("rim-pos-ticket", "txt");
-    fs::write(&file, text).map_err(|error| format!("No se pudo crear ticket temporal: {error}"))?;
-    run_print_file(&printer, &file, false)?;
-    let _ = fs::remove_file(file);
+
+    // Send ESC/POS raw so CUPS (macOS/Linux) and raw/network/COM ports (any OS)
+    // print the ticket at 58mm and cut, instead of stretching it to a full page.
+    let bytes = escpos_ticket_bytes(&text, copies);
+    let raw_file = temp_hardware_file("rim-pos-ticket", "bin");
+    fs::write(&raw_file, bytes).map_err(|error| format!("No se pudo crear ticket temporal: {error}"))?;
+    let raw_result = run_print_file(&printer, &raw_file, true);
+    let _ = fs::remove_file(&raw_file);
+
+    // On Windows a driver-backed spooler queue rejects raw; fall back to the
+    // plain-text path (Out-Printer) so those setups keep working.
+    #[cfg(windows)]
+    if raw_result.is_err() {
+        let text = if copies > 1 {
+            (0..copies).map(|_| text.clone()).collect::<Vec<_>>().join("\n")
+        } else {
+            text
+        };
+        let file = temp_hardware_file("rim-pos-ticket", "txt");
+        fs::write(&file, text).map_err(|error| format!("No se pudo crear ticket temporal: {error}"))?;
+        run_print_file(&printer, &file, false)?;
+        let _ = fs::remove_file(file);
+    }
+    #[cfg(not(windows))]
+    raw_result?;
+
     Ok(HardwareResult {
         ok: true,
         message: format!("Ticket enviado a {printer}"),
@@ -859,7 +890,10 @@ mod tests {
     };
     use crate::customers::customer_credit_adjust_with_conn;
     use crate::products::{get_product, import_products_with_conn};
-    use crate::sales::{cancel_sale_with_conn, create_sale_with_conn, validate_held_ticket_input};
+    use crate::sales::{
+        cancel_sale_with_conn, create_sale_with_conn, return_sale_item_with_conn,
+        validate_held_ticket_input,
+    };
     use crate::security::{hash_pin, verify_pin};
     use rusqlite::{params, Connection};
 
@@ -1218,6 +1252,96 @@ mod tests {
             err,
             "Venta de corte cerrado: registra devolucion en el turno actual"
         );
+    }
+
+    #[test]
+    fn partial_item_return_restores_stock_and_nets_shift_cut() {
+        let mut conn = flow_conn();
+        let session = open_cash_session_with_conn(&conn, 2, 100.0).unwrap();
+        let shift_id: i64 = conn
+            .query_row(
+                "SELECT id FROM shifts WHERE cash_session_id = ?1",
+                params![session.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        let receipt = create_sale_with_conn(
+            &mut conn,
+            SaleDraft {
+                cashier_id: 2,
+                customer_id: None,
+                items: vec![SaleItemInput {
+                    product_id: 1,
+                    quantity: 2.0,
+                    unit_price: 20.0,
+                    discount: 0.0,
+                }],
+                payments: vec![PaymentInput {
+                    method: "cash".into(),
+                    amount: 40.0,
+                    reference: None,
+                }],
+                notes: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(receipt.total, 40.0);
+
+        let sale_item_id: i64 = conn
+            .query_row(
+                "SELECT id FROM sale_items WHERE sale_id = ?1",
+                params![receipt.sale_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        // Return 1 of the 2 units.
+        return_sale_item_with_conn(&mut conn, 1, sale_item_id, 1.0, "Producto danado".into()).unwrap();
+
+        let stock_after_return: f64 = conn
+            .query_row("SELECT stock FROM products WHERE id = 1", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(stock_after_return, 4.0);
+        let cash_after_return: f64 = conn
+            .query_row(
+                "SELECT expected_cash FROM cash_sessions WHERE id = ?1",
+                params![session.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cash_after_return, 120.0);
+
+        // Cannot return more than what is left on the line.
+        let err = return_sale_item_with_conn(&mut conn, 1, sale_item_id, 2.0, "De mas".into())
+            .unwrap_err();
+        assert!(err.starts_with("Solo quedan"), "unexpected error: {err}");
+
+        let snapshot =
+            close_shift_cut_z_with_conn(&mut conn, shift_id, 120.0, 2, Some("[]".into()), None)
+                .unwrap();
+        assert_eq!(snapshot.total_tickets, 1);
+        assert_eq!(snapshot.canceled_tickets, 0);
+        assert_eq!(snapshot.net_sales, 20.0);
+        assert_eq!(snapshot.gross_profit, 10.0);
+        assert_eq!(snapshot.expected_cash, 120.0);
+        assert_eq!(snapshot.cash_difference, Some(0.0));
+        assert_eq!(snapshot.cash_refunds_total, 20.0);
+        assert_eq!(snapshot.refunds.len(), 1);
+        assert_eq!(snapshot.refunds[0].cash_amount, 20.0);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn escpos_ticket_wraps_init_and_cut_per_copy() {
+        let bytes = escpos_ticket_bytes("HOLA", 2);
+        // Starts with ESC @ (init).
+        assert_eq!(&bytes[0..2], &[0x1B, 0x40]);
+        // Ends with GS V B 0 (feed + partial cut).
+        assert_eq!(&bytes[bytes.len() - 4..], &[0x1D, 0x56, 0x42, 0x00]);
+        // Two copies -> two init sequences and two cut sequences.
+        assert_eq!(bytes.windows(2).filter(|w| *w == [0x1B, 0x40]).count(), 2);
+        assert_eq!(bytes.windows(4).filter(|w| *w == [0x1D, 0x56, 0x42, 0x00]).count(), 2);
     }
 
     #[test]
@@ -1648,6 +1772,8 @@ pub fn run() {
             crate::sales::active_sale_draft_clear,
             crate::sales::sale_create,
             crate::sales::sale_list,
+            crate::sales::sale_line_history,
+            crate::sales::sale_item_return,
             crate::sales::sale_cancel,
             crate::cash::cash_session_open,
             crate::cash::cash_session_close,

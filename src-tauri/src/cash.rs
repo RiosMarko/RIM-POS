@@ -1089,6 +1089,26 @@ pub(crate) fn calculate_shift_cut(conn: &Connection, shift_id: i64) -> CommandRe
         payment_totals.insert(method, round_money(amount));
     }
 
+    // Partial returns keep the sale 'paid', so net them out of the shift totals
+    // here (they still appear in the Devoluciones section below), mirroring how
+    // full cancellations are excluded from net_sales/tax/profit.
+    let (returns_refund_total, returns_tax, returns_profit): (f64, f64, f64) = conn
+        .query_row(
+            "SELECT
+                COALESCE(SUM(r.refund_total), 0),
+                COALESCE(SUM(CASE WHEN sitm.tax_rate > 0 THEN r.refund_total - r.refund_total / (1 + sitm.tax_rate) ELSE 0 END), 0),
+                COALESCE(SUM(r.refund_total - p.cost * r.quantity), 0)
+             FROM sale_returns r
+             JOIN sale_items sitm ON sitm.id = r.sale_item_id
+             LEFT JOIN products p ON p.id = r.product_id
+             WHERE r.shift_id = ?1",
+            params![shift_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|error| error.to_string())?;
+    let net_sales = net_sales - returns_refund_total;
+    let tax = tax - returns_tax;
+
     let cash_change = conn
         .query_row(
             "SELECT COALESCE(SUM(s.change_due), 0)
@@ -1187,9 +1207,39 @@ pub(crate) fn calculate_shift_cut(conn: &Connection, shift_id: i64) -> CommandRe
             })
         })
         .map_err(|error| error.to_string())?;
-    let refunds = refund_rows
+    let mut refunds = refund_rows
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
+
+    // Partial per-item returns are recorded in sale_returns (the sale stays 'paid').
+    let mut item_return_stmt = conn
+        .prepare(
+            "SELECT r.sale_id, s.folio, r.refund_total, r.cash_refund, r.reason, r.created_at,
+                    COALESCE(p.name, 'Producto') || ' x' || printf('%g', r.quantity)
+             FROM sale_returns r
+             JOIN sales s ON s.id = r.sale_id
+             LEFT JOIN products p ON p.id = r.product_id
+             WHERE r.shift_id = ?1
+             ORDER BY r.created_at DESC, r.id DESC",
+        )
+        .map_err(|error| error.to_string())?;
+    let item_return_rows = item_return_stmt
+        .query_map(params![shift_id], |row| {
+            Ok(CutRefundSummary {
+                sale_id: row.get(0)?,
+                folio: row.get(1)?,
+                amount: row.get(2)?,
+                cash_amount: round_money(row.get::<_, f64>(3)?),
+                reason: row.get(4)?,
+                created_at: row.get(5)?,
+                products: row.get(6)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    for row in item_return_rows {
+        refunds.push(row.map_err(|error| error.to_string())?);
+    }
+
     let cash_refunds_total = round_money(refunds.iter().map(|refund| refund.cash_amount).sum());
 
     let mut credit_payment_stmt = conn
@@ -1251,7 +1301,9 @@ pub(crate) fn calculate_shift_cut(conn: &Connection, shift_id: i64) -> CommandRe
     let departments = department_rows
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
-    let gross_profit = round_money(departments.iter().map(|department| department.gross_profit).sum());
+    let gross_profit = round_money(
+        departments.iter().map(|department| department.gross_profit).sum::<f64>() - returns_profit,
+    );
 
     let mut customer_stmt = conn
         .prepare(
