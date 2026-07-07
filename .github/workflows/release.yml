@@ -31,7 +31,7 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run typecheck
-      - uses: tauri-apps/tauri-action@v1
+      - uses: tauri-apps/tauri-action@v0.5.25
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Firma + notarizacion macOS. Vacio = tauri omite firma sin fallar.
@@ -47,6 +47,5 @@ jobs:
           releaseName: "RIM-POS ${{ github.ref_name }}"
           releaseDraft: false
           prerelease: false
-          uploadUpdaterJson: false
-          uploadUpdaterSignatures: false
+          includeUpdaterJson: false
           args: ${{ matrix.args }}
