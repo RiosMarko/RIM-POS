@@ -194,6 +194,7 @@ fn app_bootstrap(state: State<'_, AppState>, actor_id: i64) -> CommandResult<App
     let held_tickets = held_ticket_list_with_conn(&conn)?;
     let tax_enabled = setting_bool(&conn, "tax_enabled", true)?;
     let tax_prices_include_tax = setting_bool(&conn, "tax_prices_include_tax", true)?;
+    let total_round_up = setting_bool(&conn, "total_round_up", true)?;
     let unclean_shutdown = setting_bool(&conn, APP_RECOVERY_DIRTY_SETTING, false)?;
     let now = now_iso();
     conn.execute(
@@ -216,6 +217,7 @@ fn app_bootstrap(state: State<'_, AppState>, actor_id: i64) -> CommandResult<App
         held_tickets,
         tax_enabled,
         tax_prices_include_tax,
+        total_round_up,
         unclean_shutdown,
     })
 }
@@ -322,8 +324,9 @@ fn receipt_text(conn: &Connection, sale_id: i64) -> CommandResult<String> {
         demo.push_str(&"\n".repeat(extra_lines));
         return Ok(demo);
     }
-    let (folio, subtotal, tax, total, paid, change_due, created_at, cashier_name): (
+    let (folio, subtotal, tax, rounding, total, paid, change_due, created_at, cashier_name): (
         String,
+        f64,
         f64,
         f64,
         f64,
@@ -333,7 +336,7 @@ fn receipt_text(conn: &Connection, sale_id: i64) -> CommandResult<String> {
         String,
     ) = conn
         .query_row(
-            "SELECT s.folio, s.subtotal, s.tax, s.total, s.paid, s.change_due, s.created_at, u.name
+            "SELECT s.folio, s.subtotal, s.tax, s.rounding, s.total, s.paid, s.change_due, s.created_at, u.name
              FROM sales s
              JOIN users u ON u.id = s.cashier_id
              WHERE s.id = ?1",
@@ -348,6 +351,7 @@ fn receipt_text(conn: &Connection, sale_id: i64) -> CommandResult<String> {
                     row.get(5)?,
                     row.get(6)?,
                     row.get(7)?,
+                    row.get(8)?,
                 ))
             },
         )
@@ -424,6 +428,9 @@ fn receipt_text(conn: &Connection, sale_id: i64) -> CommandResult<String> {
             "SUBTOTAL        ${subtotal:.2}\nIMPUESTOS       ${tax:.2}\n"
         ));
     }
+    if rounding.abs() >= 0.005 {
+        text.push_str(&format!("REDONDEO        ${rounding:.2}\n"));
+    }
     text.push_str(&format!("*** TOTAL       ${total:.2}\nPAGADO          ${paid:.2}\nCAMBIO          ${change_due:.2}\n"));
     if show_item_count {
         text.push_str(&format!("Articulos: {}\n", format_quantity(item_count)));
@@ -436,22 +443,16 @@ fn receipt_text(conn: &Connection, sale_id: i64) -> CommandResult<String> {
 
     // Card sales get a credit voucher at the bottom: label, signature space and
     // the terminal used (stored in the card payment's reference).
-    let card_count: i64 = conn
+    let (card_count, card_terminal): (i64, Option<String>) = conn
         .query_row(
-            "SELECT COUNT(*) FROM payments WHERE sale_id = ?1 AND method = 'card'",
+            "SELECT COUNT(*),
+                    MAX(CASE WHEN TRIM(COALESCE(reference, '')) <> '' THEN reference END)
+             FROM payments WHERE sale_id = ?1 AND method = 'card'",
             params![sale_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|error| error.to_string())?;
     if card_count > 0 {
-        let card_terminal: Option<String> = conn
-            .query_row(
-                "SELECT MAX(reference) FROM payments
-                 WHERE sale_id = ?1 AND method = 'card' AND TRIM(COALESCE(reference, '')) <> ''",
-                params![sale_id],
-                |row| row.get(0),
-            )
-            .map_err(|error| error.to_string())?;
         text.push_str(&format!("{separator}\n"));
         text.push_str("VENTA A CREDITO\n");
         text.push_str("FIRMA DEL CLIENTE\n");
@@ -945,7 +946,7 @@ mod tests {
     use crate::products::{get_product, import_products_with_conn};
     use crate::sales::{
         cancel_sale_with_conn, create_sale_with_conn, return_sale_item_with_conn,
-        validate_held_ticket_input,
+        sale_detail_with_conn, validate_held_ticket_input,
     };
     use crate::security::{hash_pin, verify_pin};
     use rusqlite::{params, Connection};
@@ -1398,6 +1399,141 @@ mod tests {
         // Two copies -> two init sequences and two cut sequences.
         assert_eq!(bytes.windows(2).filter(|w| *w == [0x1B, 0x40]).count(), 2);
         assert_eq!(bytes.windows(4).filter(|w| *w == [0x1D, 0x56, 0x42, 0x00]).count(), 2);
+    }
+
+    #[test]
+    fn cleanup_removes_only_old_unsold_hidden_products() {
+        use crate::migrations::cleanup_orphan_quick_products;
+        let mut conn = flow_conn();
+        let _session = open_cash_session_with_conn(&conn, 2, 100.0).unwrap();
+        let insert_hidden = |conn: &Connection, token: &str, created: &str| {
+            conn.execute(
+                "INSERT INTO products (sku, barcode, name, category, unit, price, cost, stock, min_stock, tax_rate, active, catalog_hidden, search_text, created_at, updated_at)
+                 VALUES (?1, ?1, ?2, 'Venta rapida', 'pieza', 10, 0, 1000, 0, 0, 1, 1, '', ?3, ?3)",
+                params![token, token, created],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        let old_unsold = insert_hidden(&conn, "OLD", "2020-01-01T00:00:00+00:00");
+        let recent_unsold = insert_hidden(&conn, "NEW", &now_iso());
+        let old_sold = insert_hidden(&conn, "SOLD", "2020-01-01T00:00:00+00:00");
+        // Sell the old_sold one so it is not orphan.
+        create_sale_with_conn(
+            &mut conn,
+            SaleDraft {
+                cashier_id: 2,
+                customer_id: None,
+                items: vec![SaleItemInput { product_id: old_sold, quantity: 1.0, unit_price: 10.0, discount: 0.0 }],
+                payments: vec![PaymentInput { method: "cash".into(), amount: 10.0, reference: None }],
+                notes: None,
+            },
+        )
+        .unwrap();
+
+        cleanup_orphan_quick_products(&conn);
+
+        let exists = |conn: &Connection, id: i64| -> bool {
+            conn.query_row("SELECT COUNT(*) FROM products WHERE id = ?1", params![id], |row| row.get::<_, i64>(0)).unwrap() > 0
+        };
+        assert!(!exists(&conn, old_unsold), "old unsold hidden product should be removed");
+        assert!(exists(&conn, recent_unsold), "recent hidden product should stay");
+        assert!(exists(&conn, old_sold), "sold hidden product should stay");
+        assert!(exists(&conn, 1), "normal catalog product must never be touched");
+    }
+
+    #[test]
+    fn sale_detail_returns_items_payments_and_partial_return_status() {
+        let mut conn = flow_conn();
+        let _session = open_cash_session_with_conn(&conn, 2, 100.0).unwrap();
+        let receipt = create_sale_with_conn(
+            &mut conn,
+            SaleDraft {
+                cashier_id: 2,
+                customer_id: None,
+                items: vec![SaleItemInput { product_id: 1, quantity: 2.0, unit_price: 20.0, discount: 0.0 }],
+                payments: vec![PaymentInput { method: "cash".into(), amount: 40.0, reference: None }],
+                notes: None,
+            },
+        )
+        .unwrap();
+        let sale_item_id: i64 = conn
+            .query_row("SELECT id FROM sale_items WHERE sale_id = ?1", params![receipt.sale_id], |row| row.get(0))
+            .unwrap();
+        return_sale_item_with_conn(&mut conn, 1, sale_item_id, 1.0, "Prueba".into()).unwrap();
+
+        let detail = sale_detail_with_conn(&conn, receipt.sale_id).unwrap();
+        assert_eq!(detail.folio, receipt.folio);
+        assert_eq!(detail.status, "paid");
+        assert_eq!(detail.cashier_name, "Cajera");
+        assert_eq!(detail.items.len(), 1);
+        assert_eq!(detail.items[0].quantity, 2.0);
+        assert_eq!(detail.items[0].returned_quantity, 1.0);
+        assert_eq!(detail.payments.len(), 1);
+        assert_eq!(detail.payments[0].method, "cash");
+        assert_eq!(detail.payments[0].amount, 40.0);
+    }
+
+    #[test]
+    fn folio_is_global_consecutive_and_continues_after_legacy() {
+        let mut conn = flow_conn();
+        let _session = open_cash_session_with_conn(&conn, 2, 100.0).unwrap();
+        // Simulate 3 legacy sales with the old monthly folio format.
+        for seq in 1..=3 {
+            conn.execute(
+                "INSERT INTO sales (folio, monthly_seq, cashier_id, subtotal, tax, discount, total, paid, change_due, status, created_at)
+                 VALUES (?1, ?2, 2, 10, 0, 0, 10, 10, 0, 'paid', ?3)",
+                params![format!("2026-06-{seq:03}"), seq, now_iso()],
+            )
+            .unwrap();
+        }
+        let make_sale = |conn: &mut Connection| {
+            create_sale_with_conn(
+                conn,
+                SaleDraft {
+                    cashier_id: 2,
+                    customer_id: None,
+                    items: vec![SaleItemInput { product_id: 1, quantity: 1.0, unit_price: 20.0, discount: 0.0 }],
+                    payments: vec![PaymentInput { method: "cash".into(), amount: 20.0, reference: None }],
+                    notes: None,
+                },
+            )
+            .unwrap()
+        };
+        // 3 legacy sales exist -> next visible folio continues at 4, then 5.
+        let first = make_sale(&mut conn);
+        assert_eq!(first.folio, "4");
+        let second = make_sale(&mut conn);
+        assert_eq!(second.folio, "5");
+    }
+
+    #[test]
+    fn sale_total_rounds_up_to_whole_pesos() {
+        let mut conn = flow_conn();
+        let _session = open_cash_session_with_conn(&conn, 2, 100.0).unwrap();
+        let receipt = create_sale_with_conn(
+            &mut conn,
+            SaleDraft {
+                cashier_id: 2,
+                customer_id: None,
+                items: vec![SaleItemInput { product_id: 1, quantity: 1.0, unit_price: 58.90, discount: 0.0 }],
+                payments: vec![PaymentInput { method: "cash".into(), amount: 59.0, reference: None }],
+                notes: None,
+            },
+        )
+        .unwrap();
+        // 58.90 charged as 59; no change; 0.10 recorded as rounding.
+        assert_eq!(receipt.total, 59.0);
+        let (total, rounding, change): (f64, f64, f64) = conn
+            .query_row(
+                "SELECT total, rounding, change_due FROM sales WHERE id = ?1",
+                params![receipt.sale_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(total, 59.0);
+        assert_eq!(rounding, 0.10);
+        assert_eq!(change, 0.0);
     }
 
     #[test]
@@ -1874,6 +2010,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             crate::products::product_search,
+            crate::products::quick_product_create,
             crate::products::product_get_many,
             crate::products::product_upsert,
             crate::products::product_bulk_validate,
@@ -1885,6 +2022,7 @@ pub fn run() {
             crate::users::auth_create_initial_admin,
             crate::users::auth_login,
             crate::users::user_list,
+            crate::users::cashier_options,
             crate::users::user_create,
             crate::users::user_update,
             crate::users::user_delete,
@@ -1906,6 +2044,7 @@ pub fn run() {
             crate::sales::sale_create,
             crate::sales::sale_list,
             crate::sales::sale_line_history,
+            crate::sales::sale_detail,
             crate::sales::sale_item_return,
             crate::sales::sale_cancel,
             crate::cash::cash_session_open,

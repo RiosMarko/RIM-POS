@@ -49,7 +49,7 @@ export function AdminView({
   refreshProducts: (query?: string, options?: ProductSearchOptions) => Promise<Product[]>;
   refreshSummary: () => Promise<void>;
   showToast: (message: string) => void;
-  onTaxModeChange: (mode: { enabled: boolean; pricesIncludeTax: boolean }) => void;
+  onTaxModeChange: (mode: { enabled: boolean; pricesIncludeTax: boolean; roundTotalUp?: boolean }) => void;
   requestConfirm: (draft: ConfirmDraft) => void;
   requestView: (view: ViewKey) => void;
 }) {

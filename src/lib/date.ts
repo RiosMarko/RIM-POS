@@ -1,3 +1,17 @@
+// Cached Intl formatters: toLocale*String builds a new formatter per call,
+// which is slow when formatting hundreds of rows. Output is identical.
+const dateMxFormatter = new Intl.DateTimeFormat("es-MX", {
+  day: "2-digit",
+  month: "2-digit",
+  year: "numeric",
+});
+const dayFormatter = new Intl.DateTimeFormat("es-MX", { day: "2-digit" });
+const monthLongFormatter = new Intl.DateTimeFormat("es-MX", { month: "long" });
+const timeMxFormatter = new Intl.DateTimeFormat("es-MX", {
+  hour: "2-digit",
+  minute: "2-digit",
+});
+
 export function localDateKey(value: string | number | Date = new Date()) {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return "";
@@ -10,30 +24,21 @@ export function localDateKey(value: string | number | Date = new Date()) {
 export function formatDateMx(value: string | number | Date) {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleDateString("es-MX", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-  });
+  return dateMxFormatter.format(date);
 }
 
 export function formatLongDateMx(value: string | number | Date) {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return "";
-  const day = date.toLocaleDateString("es-MX", {
-    day: "2-digit",
-  });
-  const month = date.toLocaleDateString("es-MX", { month: "long" });
+  const day = dayFormatter.format(date);
+  const month = monthLongFormatter.format(date);
   return `${day} de ${month} del ${date.getFullYear()}`;
 }
 
 export function formatTimeMx(value: string | number | Date) {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleTimeString("es-MX", {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  return timeMxFormatter.format(date);
 }
 
 export function formatDateTimeMx(value: string | number | Date) {

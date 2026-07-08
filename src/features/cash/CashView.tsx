@@ -23,7 +23,7 @@ import {
   printShiftCut,
 } from "../../lib/posApi";
 import type { AuditLogEntry, CashCount, CashMovement, CashSession, DailyCutSummary, SaleListItem, ShiftCutSnapshot, UserSession } from "../../types";
-import { CashDialog, SaleCancelModal } from "./CashModals";
+import { CashDialog, SaleCancelModal, SaleTicketModal } from "./CashModals";
 
 const CUT_COLUMN_WIDTHS = [30, 18, 18, 22, 20, 34];
 
@@ -214,6 +214,7 @@ export function CashView({
   const [dailyCut, setDailyCut] = useState<DailyCutSummary | null>(null);
   const selectedDate = localDateKey();
   const [cancelDraft, setCancelDraft] = useState<SaleListItem | null>(null);
+  const [ticketSaleId, setTicketSaleId] = useState<number | null>(null);
   const [cancelAdminDraft, setCancelAdminDraft] = useState<{ sale: SaleListItem; reason: string } | null>(null);
   const paidSales = useMemo(() => sales.filter((sale) => sale.status === "paid"), [sales]);
   const cashSales = useMemo(() => paidSales.reduce((sum, sale) => sum + (sale.cash_paid ?? 0), 0), [paidSales]);
@@ -755,15 +756,24 @@ export function CashView({
               <span>{money(sale.total)}</span>
               <span>E {money(sale.cash_paid ?? 0)} / Tar {money(sale.card_paid ?? 0)} / Transf {money(sale.transfer_paid ?? 0)}</span>
               <span>{sale.status === "paid" ? "Pagada" : "Cancelada"}</span>
-              <button
-                className="danger-button mini"
-                type="button"
-                disabled={!sale.cancelable}
-                title={sale.cancelable ? "Cancelar venta" : "Turno cerrado: registra devolucion en el turno actual"}
-                onClick={() => setCancelDraft(sale)}
-              >
-                Cancelar
-              </button>
+              <div className="sale-row-actions">
+                <button
+                  className="ghost-button mini"
+                  type="button"
+                  onClick={() => setTicketSaleId(sale.id)}
+                >
+                  Ver ticket
+                </button>
+                <button
+                  className="danger-button mini"
+                  type="button"
+                  disabled={!sale.cancelable}
+                  title={sale.cancelable ? "Cancelar venta" : "Turno cerrado: registra devolucion en el turno actual"}
+                  onClick={() => setCancelDraft(sale)}
+                >
+                  Cancelar
+                </button>
+              </div>
             </div>
           ))}
         </div>
@@ -819,6 +829,13 @@ export function CashView({
           onMovement={addMovement}
           onAudit={cashAudit}
           onFinalCut={finalCut}
+        />
+      )}
+      {ticketSaleId !== null && (
+        <SaleTicketModal
+          saleId={ticketSaleId}
+          onClose={() => setTicketSaleId(null)}
+          showToast={showToast}
         />
       )}
       {cancelDraft && (

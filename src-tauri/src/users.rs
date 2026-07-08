@@ -1,4 +1,4 @@
-use crate::auth::{ensure_admin_remains, require_admin, UserSession};
+use crate::auth::{ensure_admin_remains, require_active_user, require_admin, UserSession};
 use crate::backend::{AppState, CommandResult};
 use crate::core::now_iso;
 use crate::models::*;
@@ -174,6 +174,27 @@ pub(crate) fn auth_login(state: State<'_, AppState>, input: LoginInput) -> Comma
         role,
         permissions,
     })
+}
+
+/// Lightweight list of active users (id + name) for filter dropdowns. Unlike
+/// user_list it only needs an active user, so cashiers can use it too.
+#[tauri::command]
+pub(crate) fn cashier_options(state: State<'_, AppState>, actor_id: i64) -> CommandResult<Vec<CashierOption>> {
+    let conn = state.db.lock().map_err(|error| error.to_string())?;
+    require_active_user(&conn, actor_id)?;
+    let mut stmt = conn
+        .prepare("SELECT id, name FROM users WHERE active = 1 ORDER BY name")
+        .map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(CashierOption {
+                id: row.get(0)?,
+                name: row.get(1)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

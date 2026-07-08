@@ -23,8 +23,12 @@ export function InventoryView({
   const [movements, setMovements] = useState<InventoryMovement[]>([]);
   const [inventoryQuery, setInventoryQuery] = useState("");
   const [inventoryPage, setInventoryPage] = useState(0);
+  const [viewAll, setViewAll] = useState(false);
   const inventorySearchRef = useRef<HTMLInputElement>(null);
-  const visibleProducts = useMemo(() => products.slice(0, INVENTORY_PAGE_SIZE), [products]);
+  const visibleProducts = useMemo(
+    () => (viewAll ? products : products.slice(0, INVENTORY_PAGE_SIZE)),
+    [products, viewAll],
+  );
   const zeroStock = useMemo(() => visibleProducts.filter((product) => product.stock <= 0), [visibleProducts]);
   const inventoryValue = useMemo(() => visibleProducts.reduce((sum, product) => sum + product.stock * product.cost, 0), [visibleProducts]);
   const totalUnits = useMemo(() => visibleProducts.reduce((sum, product) => sum + product.stock, 0), [visibleProducts]);
@@ -44,8 +48,19 @@ export function InventoryView({
   }, []);
 
   const loadInventoryPage = useCallback(async (query: string, page: number) => {
+    setViewAll(false);
     await refreshProducts(query, { limit: INVENTORY_PAGE_SIZE + 1, offset: page * INVENTORY_PAGE_SIZE });
   }, [refreshProducts]);
+
+  const loadFullInventory = useCallback(async () => {
+    try {
+      await refreshProducts(inventoryQuery, { limit: 50000, offset: 0 });
+      setInventoryPage(0);
+      setViewAll(true);
+    } catch (error) {
+      showToast(String(error));
+    }
+  }, [inventoryQuery, refreshProducts, showToast]);
 
   useEffect(() => {
     refreshKardex().catch((error) => showToast(String(error)));
@@ -180,12 +195,18 @@ export function InventoryView({
             </div>
           ))}
           <div className="table-pagination">
-            <span>{visibleProducts.length === 0 ? "Sin resultados" : `Mostrando ${inventoryPageStart}-${inventoryPageEnd} por codigo`}</span>
+            <span>
+              {visibleProducts.length === 0
+                ? "Sin resultados"
+                : viewAll
+                  ? `Mostrando todo: ${visibleProducts.length} productos`
+                  : `Mostrando ${inventoryPageStart}-${inventoryPageEnd} por codigo`}
+            </span>
             <div>
               <button
                 className="ghost-button"
                 type="button"
-                disabled={inventoryPage === 0}
+                disabled={viewAll || inventoryPage === 0}
                 onClick={() => {
                   const nextPage = inventoryPage - 1;
                   setInventoryPage(nextPage);
@@ -197,7 +218,7 @@ export function InventoryView({
               <button
                 className="ghost-button"
                 type="button"
-                disabled={!hasNextInventoryPage}
+                disabled={viewAll || !hasNextInventoryPage}
                 onClick={() => {
                   const nextPage = inventoryPage + 1;
                   setInventoryPage(nextPage);
@@ -205,6 +226,14 @@ export function InventoryView({
                 }}
               >
                 Siguiente
+              </button>
+              <button
+                className="ghost-button"
+                type="button"
+                disabled={viewAll}
+                onClick={() => void loadFullInventory()}
+              >
+                Ver todo
               </button>
             </div>
           </div>

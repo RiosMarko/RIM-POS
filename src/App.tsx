@@ -21,6 +21,7 @@ import { ExpenseDialog } from "./features/cash/CashModals";
 import {
   DeleteHeldTicketModal,
   HeldTicketsModal,
+  QuickSaleModal,
   RecoveryDraftModal,
   ShortcutHelp,
   TicketNameModal,
@@ -28,7 +29,6 @@ import {
   WeightPromptModal,
 } from "./features/sales/SaleModals";
 import { SaleView } from "./features/sales/SaleView";
-import { useClock } from "./hooks/useClock";
 import { useAdminNavigation } from "./hooks/useAdminNavigation";
 import { usePosShortcuts } from "./hooks/usePosShortcuts";
 import { useToasts } from "./hooks/useToasts";
@@ -52,6 +52,7 @@ import {
   getActiveSaleDraft,
   saveActiveSaleDraft,
   markAppRecoveryClean,
+  quickProductCreate,
   saveHeldTicket,
   searchProducts,
   needsInitialSetup,
@@ -100,10 +101,10 @@ function App() {
   const [session, setSession] = useState<UserSession | null>(null);
   const [setupRequired, setSetupRequired] = useState(false);
   const { notifications, showToast, dismissToast } = useToasts();
-  const clock = useClock();
-  const handleTaxModeChange = useCallback(({ enabled, pricesIncludeTax: nextPricesIncludeTax }: { enabled: boolean; pricesIncludeTax: boolean }) => {
+  const handleTaxModeChange = useCallback(({ enabled, pricesIncludeTax: nextPricesIncludeTax, roundTotalUp: nextRoundTotalUp }: { enabled: boolean; pricesIncludeTax: boolean; roundTotalUp?: boolean }) => {
     setTaxEnabled(enabled);
     setPricesIncludeTax(nextPricesIncludeTax);
+    if (typeof nextRoundTotalUp === "boolean") setRoundTotalUp(nextRoundTotalUp);
   }, []);
   const { loginMaximized, windowTransition, enterPosMode, enterLoginMode } = useWindowMode(session);
   const [query, setQuery] = useState("");
@@ -132,8 +133,10 @@ function App() {
   const [numberPromptDraft, setNumberPromptDraft] = useState<NumberPromptDraft | null>(null);
   const [selectedCartProductId, setSelectedCartProductId] = useState<number | null>(null);
   const [weightPromptProduct, setWeightPromptProduct] = useState<Product | null>(null);
+  const [quickSaleOpen, setQuickSaleOpen] = useState(false);
   const [taxEnabled, setTaxEnabled] = useState(true);
   const [pricesIncludeTax, setPricesIncludeTax] = useState(true);
+  const [roundTotalUp, setRoundTotalUp] = useState(true);
   const searchRef = useRef<HTMLInputElement>(null);
   const cashRef = useRef<HTMLInputElement>(null);
   const recoveryCheckedSessionRef = useRef<number | null>(null);
@@ -151,7 +154,17 @@ function App() {
     grantPendingAdminView,
     resetNavigation,
   } = useAdminNavigation({ session, isAdmin, navItems });
-  const totals = useMemo(() => cartTotals(cart, pricesIncludeTax, taxEnabled), [cart, pricesIncludeTax, taxEnabled]);
+  const rawTotals = useMemo(() => cartTotals(cart, pricesIncludeTax, taxEnabled), [cart, pricesIncludeTax, taxEnabled]);
+  // Charge total is rounded UP to whole pesos (58.90 -> 59). Backend does the
+  // same (setting total_round_up, default on) so records and drawer match.
+  const chargeTotal = useMemo(
+    () => (roundTotalUp ? Math.ceil(rawTotals.total - 1e-6) : rawTotals.total),
+    [rawTotals.total, roundTotalUp],
+  );
+  const totals = useMemo(
+    () => ({ ...rawTotals, total: chargeTotal, rounding: roundMoney(chargeTotal - rawTotals.total) }),
+    [rawTotals, chargeTotal],
+  );
   const cashPaid = Number(cashReceived) || 0;
   const cardPaid = Number(cardReceived) || 0;
   const transferPaid = Number(transferReceived) || 0;
@@ -241,6 +254,7 @@ function App() {
         setHeldTickets(bootstrap.held_tickets);
         setTaxEnabled(bootstrap.tax_enabled);
         setPricesIncludeTax(bootstrap.tax_prices_include_tax);
+        setRoundTotalUp(bootstrap.total_round_up);
         if (bootstrap.unclean_shutdown) {
           requestView("sale");
           setUncleanShutdownAlert(true);
@@ -379,6 +393,12 @@ function App() {
 
   const submitSearch = async (event?: FormEvent) => {
     event?.preventDefault();
+    // Typing "0" + Enter opens the quick-sale panel for off-catalog products.
+    if (query.trim() === "0") {
+      setQuery("");
+      setQuickSaleOpen(true);
+      return;
+    }
     const requestId = saleProductSearchRequestRef.current + 1;
     saleProductSearchRequestRef.current = requestId;
     const result = await searchProducts(query);
@@ -386,6 +406,16 @@ function App() {
     setSaleProducts(result);
     if (query.trim() && result.length === 1) requestAddProduct(result[0]);
   };
+
+  const createQuickSale = useCallback(async (input: { name: string; quantity: number; price: number; taxRate: number }) => {
+    try {
+      const product = await quickProductCreate({ name: input.name, price: input.price, tax_rate: input.taxRate });
+      addProduct(product, input.quantity);
+      setQuickSaleOpen(false);
+    } catch (error) {
+      showToast(String(error));
+    }
+  }, [addProduct, showToast]);
 
   const completeSale = async (options: { printTicket?: boolean } = {}) => {
     if (!session) return;
@@ -971,7 +1001,6 @@ function App() {
     return (
       <div className="chrome-shell login-chrome">
         <WindowTitlebar
-          clock={clock}
           roleLabel="Acceso"
         />
         <LoginScreen onLogin={handleLoginSuccess} setupRequired={setupRequired} showToast={showToast} maximized={loginMaximized} />
@@ -984,7 +1013,6 @@ function App() {
   return (
     <div className="chrome-shell app-chrome">
       <AppShell
-        clock={clock}
         session={session}
         summary={summary}
         currentView={currentView}
@@ -1078,6 +1106,16 @@ function App() {
               addProduct(weightPromptProduct, quantity);
               setWeightPromptProduct(null);
             }}
+          />
+        )}
+        {quickSaleOpen && (
+          <QuickSaleModal
+            showToast={showToast}
+            onCancel={() => {
+              setQuickSaleOpen(false);
+              searchRef.current?.focus();
+            }}
+            onConfirm={createQuickSale}
           />
         )}
         {ticketNameDraft && (

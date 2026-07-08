@@ -1,7 +1,7 @@
 use crate::auth::{require_active_user, require_admin};
 use crate::backend::{current_workstation_id, line_amounts, setting_bool, AppState, CommandResult};
 use crate::cash::get_open_shift;
-use crate::core::{next_monthly_seq, now_iso, period_key, round_money, visible_monthly_folio};
+use crate::core::{next_monthly_seq, now_iso, period_key, round_money};
 use crate::models::*;
 use crate::validation::{validate_non_negative, validate_positive};
 use rusqlite::{params, types::Type, Connection, OptionalExtension};
@@ -307,6 +307,9 @@ pub(crate) fn create_sale_with_conn(conn: &mut Connection, draft: SaleDraft) -> 
     let mut subtotal = 0.0;
     let mut tax = 0.0;
     let mut discount = 0.0;
+    // tax_rate per item, reused by the insert loop below so each product is
+    // only looked up once per sale.
+    let mut item_tax_rates = Vec::with_capacity(draft.items.len());
 
     for item in &draft.items {
         if !item.quantity.is_finite() || item.quantity <= 0.0 {
@@ -327,6 +330,7 @@ pub(crate) fn create_sale_with_conn(conn: &mut Connection, draft: SaleDraft) -> 
                 item.product_id
             ));
         }
+        item_tax_rates.push(tax_rate);
         let base = item.quantity * item.unit_price;
         let line_discount = item.discount.max(0.0).min(base);
         let (line_subtotal, line_tax, _) = line_amounts(
@@ -341,7 +345,12 @@ pub(crate) fn create_sale_with_conn(conn: &mut Connection, draft: SaleDraft) -> 
         discount += line_discount;
     }
 
-    let total = round_money(subtotal + tax);
+    // Round the charged total up to whole pesos when enabled (e.g. 58.90 -> 59).
+    // Only the total moves; subtotal/tax stay and the delta is stored as rounding.
+    let raw_total = round_money(subtotal + tax);
+    let round_up = setting_bool(&tx, "total_round_up", true)?;
+    let total = if round_up { raw_total.ceil() } else { raw_total };
+    let rounding = round_money(total - raw_total);
     for payment in &draft.payments {
         validate_positive(payment.amount, "Pago invalido")?;
     }
@@ -373,12 +382,28 @@ pub(crate) fn create_sale_with_conn(conn: &mut Connection, draft: SaleDraft) -> 
         )
         .map_err(|error| error.to_string())?;
     let monthly_seq = next_monthly_seq(current_month_max);
-    let folio = visible_monthly_folio(&period, monthly_seq);
+    // Visible folio: lifetime global consecutive ("4581"), never resets, no
+    // gaps. Continues after both legacy "YYYY-MM-NNN" folios (counted via
+    // COUNT(*)) and any numeric folios already issued. monthly_seq stays for
+    // monthly reports.
+    let numeric_folio_max: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(CAST(folio AS INTEGER)), 0)
+             FROM sales
+             WHERE folio <> '' AND folio NOT GLOB '*[^0-9]*'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let sales_count: i64 = tx
+        .query_row("SELECT COUNT(*) FROM sales", [], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    let folio = (numeric_folio_max.max(sales_count) + 1).to_string();
 
     tx.execute(
         "INSERT INTO sales
-         (folio, monthly_seq, shift_id, cashier_id, customer_id, cash_session_id, subtotal, tax, discount, total, paid, change_due, status, notes, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'paid', ?13, ?14)",
+         (folio, monthly_seq, shift_id, cashier_id, customer_id, cash_session_id, subtotal, tax, discount, total, paid, change_due, rounding, status, notes, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'paid', ?14, ?15)",
         params![
             folio,
             monthly_seq,
@@ -392,6 +417,7 @@ pub(crate) fn create_sale_with_conn(conn: &mut Connection, draft: SaleDraft) -> 
             total,
             paid,
             change_due,
+            rounding,
             draft.notes.as_deref(),
             created_at
         ],
@@ -399,14 +425,7 @@ pub(crate) fn create_sale_with_conn(conn: &mut Connection, draft: SaleDraft) -> 
     .map_err(|error| error.to_string())?;
     let sale_id = tx.last_insert_rowid();
 
-    for item in &draft.items {
-        let tax_rate: f64 = tx
-            .query_row(
-                "SELECT tax_rate FROM products WHERE id = ?1",
-                params![item.product_id],
-                |row| row.get(0),
-            )
-            .map_err(|error| error.to_string())?;
+    for (item, &tax_rate) in draft.items.iter().zip(item_tax_rates.iter()) {
         let base = item.quantity * item.unit_price;
         let line_discount = item.discount.max(0.0).min(base);
         let (_, _, line_total) = line_amounts(
@@ -605,6 +624,109 @@ pub(crate) fn sale_line_history(
         .map_err(|error| error.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())
+}
+
+/// Full detail of a single sale (paid or canceled) for the "Ver ticket" view in
+/// the cash cut: header totals, payments and every sold line with its return
+/// status. Any active user can look this up (no admin action taken here).
+#[tauri::command]
+pub(crate) fn sale_detail(
+    state: State<'_, AppState>,
+    actor_id: i64,
+    sale_id: i64,
+) -> CommandResult<SaleTicketDetail> {
+    let conn = state.db.lock().map_err(|error| error.to_string())?;
+    require_active_user(&conn, actor_id)?;
+    sale_detail_with_conn(&conn, sale_id)
+}
+
+pub(crate) fn sale_detail_with_conn(conn: &Connection, sale_id: i64) -> CommandResult<SaleTicketDetail> {
+    let (folio, status, cashier_name, created_at, subtotal, tax, discount, rounding, total, paid, change_due): (
+        String,
+        String,
+        String,
+        String,
+        f64,
+        f64,
+        f64,
+        f64,
+        f64,
+        f64,
+        f64,
+    ) = conn
+        .query_row(
+            "SELECT s.folio, s.status, u.name, s.created_at, s.subtotal, s.tax, s.discount, s.rounding, s.total, s.paid, s.change_due
+             FROM sales s JOIN users u ON u.id = s.cashier_id
+             WHERE s.id = ?1",
+            params![sale_id],
+            |row| {
+                Ok((
+                    row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?,
+                    row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?,
+                ))
+            },
+        )
+        .map_err(|_| format!("Venta no encontrada: {sale_id}"))?;
+
+    let mut item_stmt = conn
+        .prepare(
+            "SELECT COALESCE(p.name, 'Producto eliminado'), COALESCE(p.unit, 'pieza'),
+                    si.quantity,
+                    COALESCE((SELECT SUM(r.quantity) FROM sale_returns r WHERE r.sale_item_id = si.id), 0),
+                    si.unit_price, si.discount, si.line_total
+             FROM sale_items si
+             LEFT JOIN products p ON p.id = si.product_id
+             WHERE si.sale_id = ?1
+             ORDER BY si.id",
+        )
+        .map_err(|error| error.to_string())?;
+    let items = item_stmt
+        .query_map(params![sale_id], |row| {
+            Ok(SaleTicketItem {
+                product_name: row.get(0)?,
+                unit: row.get(1)?,
+                quantity: row.get(2)?,
+                returned_quantity: row.get(3)?,
+                unit_price: row.get(4)?,
+                discount: row.get(5)?,
+                line_total: row.get(6)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    let mut payment_stmt = conn
+        .prepare("SELECT method, amount, reference FROM payments WHERE sale_id = ?1 ORDER BY id")
+        .map_err(|error| error.to_string())?;
+    let payments = payment_stmt
+        .query_map(params![sale_id], |row| {
+            Ok(SaleTicketPayment {
+                method: row.get(0)?,
+                amount: row.get(1)?,
+                reference: row.get(2)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    Ok(SaleTicketDetail {
+        sale_id,
+        folio,
+        status,
+        cashier_name,
+        created_at,
+        subtotal,
+        tax,
+        discount,
+        rounding,
+        total,
+        paid,
+        change_due,
+        items,
+        payments,
+    })
 }
 
 /// Partial return of a single sold line. Restores stock, records the refund

@@ -11,11 +11,14 @@ export function Metric({ icon: Icon, label, value }: { icon: LucideIcon; label: 
 }
 
 export function Setting({ icon: Icon, label, value }: { icon: LucideIcon; label: string; value: string }) {
+  // Long values (e.g. printer queue names) get a smaller font so they fit
+  // without squashing the icon or overflowing the card.
+  const longValue = value.length > 18;
   return (
     <div className="setting-row">
       <Icon size={20} />
       <span>{label}</span>
-      <strong>{value}</strong>
+      <strong className={longValue ? "setting-value-long" : undefined}>{value}</strong>
     </div>
   );
 }

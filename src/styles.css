@@ -1210,6 +1210,29 @@ button:active {
   min-height: 32px;
 }
 
+/* Icon and label keep their size; only the value flexes. Long values (printer
+   queue names) shrink and wrap instead of squashing the icon. */
+.setting-row svg {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+}
+
+.setting-row span {
+  flex: 0 0 auto;
+}
+
+.setting-row strong {
+  min-width: 0;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.setting-row .setting-value-long {
+  font-size: 0.76rem;
+  line-height: 1.25;
+}
+
 .summary-lines strong,
 .setting-row strong {
   font-variant-numeric: tabular-nums;
@@ -1733,12 +1756,26 @@ kbd {
 
 .sale-row {
   display: grid;
-  grid-template-columns: minmax(120px, 1fr) 120px 100px 210px 100px 96px;
+  grid-template-columns: minmax(120px, 1fr) 120px 100px 210px 100px 180px;
   align-items: center;
   gap: 12px;
   min-height: 48px;
   padding: 0 12px;
   border-top: 1px solid var(--line);
+}
+
+.sale-row-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.sale-row-actions button,
+.history-row-actions button {
+  min-height: 26px;
+  padding: 0 8px;
+  font-size: 0.78rem;
+  gap: 5px;
 }
 
 .purchase-row,
@@ -1802,6 +1839,13 @@ kbd {
 .purchase-row:not(.table-head):hover,
 .invoice-row:not(.table-head):hover {
   background: var(--surface-soft);
+}
+
+/* The workspace row is a fixed-height grid cell; without these the table grows
+   past the footer instead of scrolling inside the view. */
+.history-view {
+  min-height: 0;
+  overflow: auto;
 }
 
 .history-tabs {
@@ -1876,12 +1920,18 @@ kbd {
 
 .history-row {
   display: grid;
-  grid-template-columns: minmax(130px, 1fr) 80px 84px 92px 116px 108px 74px 96px 104px;
+  grid-template-columns: minmax(130px, 1fr) 80px 84px 92px 116px 108px 74px 96px 190px;
   align-items: center;
   gap: 10px;
   min-height: 44px;
   padding: 0 12px;
   border-top: 1px solid var(--line);
+}
+
+.history-row-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
 }
 
 .pay-tag {
@@ -3324,6 +3374,15 @@ kbd {
   font-weight: 800;
 }
 
+.unconfigured-device-list {
+  display: grid;
+  gap: 4px;
+}
+
+.unconfigured-device-list strong {
+  color: var(--ink);
+}
+
 .inventory-side {
   display: grid;
   align-content: start;
@@ -4322,6 +4381,58 @@ kbd {
   font-weight: 900;
 }
 
+.quick-sale-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.quick-sale-taxes {
+  display: grid;
+  gap: 8px;
+}
+
+.quick-sale-taxes > span {
+  font-weight: 850;
+  color: var(--ink);
+}
+
+.quick-sale-tax-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.quick-sale-tax {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  font-weight: 800;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.quick-sale-tax input[type="checkbox"] {
+  appearance: auto;
+  -webkit-appearance: checkbox;
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  flex: 0 0 auto;
+  cursor: pointer;
+  accent-color: var(--brand);
+}
+
 .weight-prompt-total {
   display: flex;
   align-items: center;
@@ -4340,6 +4451,73 @@ kbd {
   font-size: 26px;
   font-weight: 900;
   color: var(--ink);
+}
+
+.sale-ticket-modal {
+  max-width: 460px;
+}
+
+.sale-ticket-items {
+  display: grid;
+  gap: 2px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.sale-ticket-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.sale-ticket-item > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.sale-ticket-item small {
+  color: var(--muted);
+  font-weight: 750;
+}
+
+.sale-ticket-totals {
+  display: grid;
+  gap: 4px;
+  padding-top: 8px;
+}
+
+.sale-ticket-totals > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.sale-ticket-totals span {
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.sale-ticket-total-row {
+  padding-top: 6px;
+  margin-top: 4px;
+  border-top: 1px solid var(--line);
+}
+
+.sale-ticket-total-row span,
+.sale-ticket-total-row strong {
+  font-size: 1.1rem;
+}
+
+.sale-ticket-payments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 4px;
 }
 
 .muted-copy {

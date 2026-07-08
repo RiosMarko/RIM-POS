@@ -1,10 +1,113 @@
 import { AlertTriangle, Banknote, ReceiptText } from "lucide-react";
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
+import { formatDateTimeMx } from "../../lib/date";
 import { money } from "../../lib/money";
 import { selectNumericInput } from "../../lib/numberInput";
-import type { SaleListItem } from "../../types";
+import { getSaleDetail } from "../../lib/posApi";
+import type { SaleListItem, SaleTicketDetail } from "../../types";
 
 const denominations = [1000, 500, 200, 100, 50, 20, 10, 5, 2, 1, 0.5];
+
+const paymentMethodLabel: Record<string, string> = {
+  cash: "Efectivo",
+  card: "Tarjeta",
+  transfer: "Transferencia",
+  voucher: "Vale",
+  credit: "Credito",
+};
+
+export function SaleTicketModal({
+  saleId,
+  onClose,
+  showToast,
+}: {
+  saleId: number;
+  onClose: () => void;
+  showToast: (message: string) => void;
+}) {
+  const [detail, setDetail] = useState<SaleTicketDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    getSaleDetail(saleId)
+      .then((result) => {
+        if (!cancelled) setDetail(result);
+      })
+      .catch((error) => {
+        if (!cancelled) showToast(String(error));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [saleId, showToast]);
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="ticket-name-modal sale-ticket-modal" role="dialog" aria-modal="true" aria-label={`Ticket ${detail?.folio ?? saleId}`}>
+        <div className="modal-title">
+          <ReceiptText size={22} />
+          <div>
+            <h2>Ticket {detail?.folio ?? ""}</h2>
+            <p>{detail ? `${formatDateTimeMx(detail.created_at)} · ${detail.cashier_name} · ${detail.status === "paid" ? "Pagada" : "Cancelada"}` : "Cargando..."}</p>
+          </div>
+        </div>
+        {loading ? (
+          <div className="empty-state compact"><span>Cargando ticket</span></div>
+        ) : !detail ? (
+          <div className="empty-state compact"><span>No se pudo cargar el ticket</span></div>
+        ) : (
+          <>
+            <div className="sale-ticket-items">
+              {detail.items.length === 0 ? (
+                <div className="muted-note">Sin articulos registrados</div>
+              ) : detail.items.map((item, index) => {
+                const returned = item.returned_quantity > 1e-6;
+                return (
+                  <div className="sale-ticket-item" key={`${item.product_name}-${index}`}>
+                    <div>
+                      <strong>{item.product_name}</strong>
+                      {returned && <span className="return-badge">devuelto {item.returned_quantity} {item.unit}</span>}
+                      <small>{item.quantity} {item.unit} x {money(item.unit_price)}{item.discount > 0 ? ` · desc ${money(item.discount)}` : ""}</small>
+                    </div>
+                    <strong className="money-cell">{money(item.line_total)}</strong>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="sale-ticket-totals">
+              <div><span>Subtotal</span><strong>{money(detail.subtotal)}</strong></div>
+              <div><span>Impuestos</span><strong>{money(detail.tax)}</strong></div>
+              {detail.discount > 0 && <div><span>Descuento</span><strong>-{money(detail.discount)}</strong></div>}
+              {Math.abs(detail.rounding) >= 0.005 && <div><span>Redondeo</span><strong>{money(detail.rounding)}</strong></div>}
+              <div className="sale-ticket-total-row"><span>Total</span><strong>{money(detail.total)}</strong></div>
+              <div><span>Pagado</span><strong>{money(detail.paid)}</strong></div>
+              {detail.change_due > 0 && <div><span>Cambio</span><strong>{money(detail.change_due)}</strong></div>}
+            </div>
+            <div className="sale-ticket-payments">
+              {detail.payments.map((payment, index) => {
+                const label = paymentMethodLabel[payment.method] ?? payment.method;
+                return (
+                  <span className={`pay-tag pay-${label.toLowerCase()}`} key={index}>
+                    {label}: {money(payment.amount)}
+                    {payment.reference ? ` (${payment.reference})` : ""}
+                  </span>
+                );
+              })}
+            </div>
+          </>
+        )}
+        <div className="modal-actions">
+          <button className="ghost-button" type="button" onClick={onClose}>Cerrar</button>
+        </div>
+      </section>
+    </div>
+  );
+}
 
 export function SaleCancelModal({
   sale,

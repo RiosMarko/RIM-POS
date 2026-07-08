@@ -372,6 +372,65 @@ fn detect_unix_printers(devices: &mut Vec<HardwareDevice>, seen: &mut HashSet<St
     }
 }
 
+/// Printers plugged in via USB (or otherwise live-detected) that don't have a
+/// CUPS queue yet. `lpstat -p` (detect_unix_printers) only lists printers
+/// already added as a queue, so a receipt printer connected but never "added"
+/// in Impresoras y Escaneres is invisible to it -- this is why a USB thermal
+/// printer can show up as "not detected" even though macOS/Linux can see it.
+/// `lpinfo -v` reports every live device CUPS can currently talk to, including
+/// unconfigured ones, as "<class> <uri>" lines (e.g. "direct usb://Brother/...").
+/// Parses one `lpinfo -v` line into (uri, readable_name) when it's a live
+/// USB-attached ("direct") device with an actual URI. Bare backend listings
+/// like "network https" (no live device using that backend right now) return
+/// None. Pulled out as a pure function so the parsing can be unit tested
+/// without depending on a real CUPS install.
+fn parse_lpinfo_direct_line(line: &str) -> Option<(String, String)> {
+    let (class, uri) = line.split_once(' ')?;
+    if class != "direct" || !uri.contains("://") {
+        return None;
+    }
+    let uri = uri.trim().to_string();
+    let readable = uri
+        .split("://")
+        .nth(1)
+        .unwrap_or(&uri)
+        .split('?')
+        .next()
+        .unwrap_or(&uri)
+        .replace("%20", " ")
+        .replace('/', " ");
+    let name = clean_device_text(&readable);
+    let name = if name.is_empty() { "Impresora USB".to_string() } else { name };
+    Some((uri, name))
+}
+
+fn detect_unconfigured_unix_printers(devices: &mut Vec<HardwareDevice>, seen: &mut HashSet<String>) {
+    let configured_uris: HashSet<String> = command_lines("lpstat", &["-v"])
+        .into_iter()
+        .filter_map(|line| line.splitn(2, ": ").nth(1).map(|uri| uri.trim().to_string()))
+        .collect();
+    for line in command_lines("lpinfo", &["-v"]) {
+        let Some((uri, name)) = parse_lpinfo_direct_line(&line) else {
+            continue;
+        };
+        if configured_uris.contains(&uri) {
+            continue;
+        }
+        add_device(
+            devices,
+            seen,
+            HardwareDevice {
+                id: uri,
+                name,
+                device_type: "unconfigured".into(),
+                connection: "unix-usb-unconfigured".into(),
+                detail: "Conectada por USB sin cola de impresion. Agregala en Ajustes del Sistema > Impresoras y Escaneres (o Preferencias del Sistema en macOS antiguo).".into(),
+                is_default: false,
+            },
+        );
+    }
+}
+
 #[cfg(windows)]
 fn detect_windows_hardware(devices: &mut Vec<HardwareDevice>, seen: &mut HashSet<String>) {
     // Single PowerShell process covers printers, serial ports and driver-less
@@ -384,7 +443,12 @@ foreach ($p in $printers) { "PRINTER|$($p.Name)|$($p.DriverName)|$($p.PortName)|
 Get-CimInstance Win32_SerialPort | ForEach-Object { "SERIAL|$($_.DeviceID)|$($_.Name)|$($_.PNPDeviceID)" }
 Get-CimInstance Win32_PnPEntity | Where-Object { $_.Name -match '\(COM[0-9]+\)' } | ForEach-Object { if ($_.Name -match '(COM[0-9]+)') { "PNPCOM|$($Matches[1])|$($_.Name)|$($_.PNPDeviceID)" } }
 Get-PnpDevice -PresentOnly | Where-Object { $_.Class -in @('Printer','Ports','USB') -and $_.Status -ne 'OK' } | ForEach-Object { "UNCONF|$($_.FriendlyName)|$($_.Class)|$($_.InstanceId)" }
+Get-PnpDevice -PresentOnly -Class Printer | ForEach-Object { "PRINTERPNP|$($_.FriendlyName)|$($_.Status)|$($_.InstanceId)" }
 "#;
+    // Names already registered as a Windows spooler printer (Win32_Printer),
+    // so the broader Class-Printer PnP scan below doesn't add a duplicate row
+    // for the same physical printer.
+    let mut spooler_printer_names: HashSet<String> = HashSet::new();
     for line in command_lines_timeout("powershell", &powershell_args(SCAN_SCRIPT), 6000) {
         let parts: Vec<&str> = line.split('|').collect();
         let Some(tag) = parts.first().copied() else {
@@ -396,6 +460,7 @@ Get-PnpDevice -PresentOnly | Where-Object { $_.Class -in @('Printer','Ports','US
                 if name.is_empty() {
                     continue;
                 }
+                spooler_printer_names.insert(name.to_ascii_lowercase());
                 let driver = clean_device_text(parts.get(2).copied().unwrap_or(""));
                 let port = clean_device_text(parts.get(3).copied().unwrap_or(""));
                 let is_default = parts
@@ -469,6 +534,31 @@ Get-PnpDevice -PresentOnly | Where-Object { $_.Class -in @('Printer','Ports','US
                         device_type: "unconfigured".into(),
                         connection: "windows-driver-missing".into(),
                         detail: format!("{class} - falta instalar driver ({instance_id})"),
+                        is_default: false,
+                    },
+                );
+            }
+            // A printer-class Plug & Play device present on the USB bus but
+            // with no matching entry in Win32_Printer: Windows sees the USB
+            // hardware but never created a spooler queue for it (missing/
+            // incomplete driver install). Without this, such a printer is
+            // completely invisible to the app even though it's plugged in.
+            "PRINTERPNP" => {
+                let name = clean_device_text(parts.get(1).copied().unwrap_or(""));
+                if name.is_empty() || spooler_printer_names.contains(&name.to_ascii_lowercase()) {
+                    continue;
+                }
+                let status = clean_device_text(parts.get(2).copied().unwrap_or(""));
+                let instance_id = clean_device_text(parts.get(3).copied().unwrap_or(""));
+                add_device(
+                    devices,
+                    seen,
+                    HardwareDevice {
+                        id: instance_id.clone(),
+                        name,
+                        device_type: "unconfigured".into(),
+                        connection: "windows-printer-no-queue".into(),
+                        detail: format!("USB detectado ({status}) sin cola de impresion en Windows. Agregala en Configuracion > Impresoras y escaneres."),
                         is_default: false,
                     },
                 );
@@ -591,7 +681,10 @@ pub fn device_list(include_network: bool) -> Vec<HardwareDevice> {
     #[cfg(windows)]
     detect_windows_hardware(&mut devices, &mut seen);
     #[cfg(not(windows))]
-    detect_unix_printers(&mut devices, &mut seen);
+    {
+        detect_unix_printers(&mut devices, &mut seen);
+        detect_unconfigured_unix_printers(&mut devices, &mut seen);
+    }
     detect_raw_printer_paths(&mut devices, &mut seen);
     detect_serial_paths(&mut devices, &mut seen);
     if include_network {
@@ -871,8 +964,39 @@ pub fn read_serial_scale(
 
 #[cfg(test)]
 mod tests {
-    use super::{network_endpoint, parse_scale_weight};
+    use super::{network_endpoint, parse_lpinfo_direct_line, parse_scale_weight};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    #[test]
+    fn parses_direct_usb_printer_line() {
+        let (uri, name) = parse_lpinfo_direct_line("direct usb://EPSON/TM-T88V?serial=X1Y2Z3").unwrap();
+        assert_eq!(uri, "usb://EPSON/TM-T88V?serial=X1Y2Z3");
+        assert_eq!(name, "EPSON TM-T88V");
+    }
+
+    #[test]
+    fn parses_direct_usb_line_with_encoded_spaces() {
+        let (uri, name) = parse_lpinfo_direct_line("direct usb://Brother/DCP-L2540DW%20series?serial=ABC").unwrap();
+        assert_eq!(uri, "usb://Brother/DCP-L2540DW%20series?serial=ABC");
+        assert_eq!(name, "Brother DCP-L2540DW series");
+    }
+
+    #[test]
+    fn ignores_bare_backend_listings_without_a_live_device() {
+        assert_eq!(parse_lpinfo_direct_line("network https"), None);
+        assert_eq!(parse_lpinfo_direct_line("network ipp"), None);
+        assert_eq!(parse_lpinfo_direct_line("serial serial"), None);
+    }
+
+    #[test]
+    fn ignores_non_direct_classes_even_with_a_uri() {
+        // Already-configured network printers surface through detect_bonjour/
+        // detect_network instead; this scan is only for unconfigured USB.
+        assert_eq!(
+            parse_lpinfo_direct_line("network dnssd://Brother._ipp._tcp.local./?uuid=abc"),
+            None
+        );
+    }
 
     #[test]
     fn parses_common_scale_output() {

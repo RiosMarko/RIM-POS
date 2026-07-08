@@ -1,8 +1,12 @@
+// Intl.NumberFormat construction is expensive; money() runs hundreds of times
+// per list render, so build the formatter once and reuse it.
+const mxnFormatter = new Intl.NumberFormat("es-MX", {
+  style: "currency",
+  currency: "MXN",
+});
+
 export function money(value: number): string {
-  return new Intl.NumberFormat("es-MX", {
-    style: "currency",
-    currency: "MXN",
-  }).format(value || 0);
+  return mxnFormatter.format(value || 0);
 }
 
 export function roundMoney(value: number): number {

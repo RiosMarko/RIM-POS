@@ -310,6 +310,42 @@ pub(crate) struct SaleListItem {
 }
 
 #[derive(Debug, Serialize)]
+pub(crate) struct SaleTicketItem {
+    pub(crate) product_name: String,
+    pub(crate) unit: String,
+    pub(crate) quantity: f64,
+    pub(crate) returned_quantity: f64,
+    pub(crate) unit_price: f64,
+    pub(crate) discount: f64,
+    pub(crate) line_total: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct SaleTicketPayment {
+    pub(crate) method: String,
+    pub(crate) amount: f64,
+    pub(crate) reference: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct SaleTicketDetail {
+    pub(crate) sale_id: i64,
+    pub(crate) folio: String,
+    pub(crate) status: String,
+    pub(crate) cashier_name: String,
+    pub(crate) created_at: String,
+    pub(crate) subtotal: f64,
+    pub(crate) tax: f64,
+    pub(crate) discount: f64,
+    pub(crate) rounding: f64,
+    pub(crate) total: f64,
+    pub(crate) paid: f64,
+    pub(crate) change_due: f64,
+    pub(crate) items: Vec<SaleTicketItem>,
+    pub(crate) payments: Vec<SaleTicketPayment>,
+}
+
+#[derive(Debug, Serialize)]
 pub(crate) struct CashSession {
     pub(crate) id: i64,
     pub(crate) opened_by: i64,
@@ -426,6 +462,7 @@ pub(crate) struct AppBootstrap {
     pub(crate) held_tickets: Vec<HeldTicket>,
     pub(crate) tax_enabled: bool,
     pub(crate) tax_prices_include_tax: bool,
+    pub(crate) total_round_up: bool,
     pub(crate) unclean_shutdown: bool,
 }
 
@@ -486,6 +523,12 @@ pub(crate) struct UserAccount {
     pub(crate) active: bool,
     pub(crate) created_at: String,
     pub(crate) permissions: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CashierOption {
+    pub(crate) id: i64,
+    pub(crate) name: String,
 }
 
 #[derive(Debug, Deserialize)]

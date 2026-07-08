@@ -2,16 +2,18 @@ import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Minus, Square, X } from "lucide-react";
 import rimPosLogo from "../../assets/rim-pos-icon.png";
+import { useClock } from "../../hooks/useClock";
 
 export function WindowTitlebar({
-  clock,
   roleLabel,
   sessionName,
 }: {
-  clock: Date;
   roleLabel: string;
   sessionName?: string;
 }) {
+  // Clock lives here (not in App) so the 1-second tick only re-renders the
+  // titlebar instead of the whole app.
+  const clock = useClock();
   const [maximized, setMaximized] = useState(false);
 
   useEffect(() => {

@@ -1,8 +1,10 @@
-import { AlertTriangle, Archive, Scale, Ticket, Trash2 } from "lucide-react";
+import { AlertTriangle, Archive, PackagePlus, Scale, Ticket, Trash2 } from "lucide-react";
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { formatDateTimeMx } from "../../lib/date";
 import { money } from "../../lib/money";
-import type { ActiveSaleDraft, HeldTicket, Product } from "../../types";
+import { selectNumericInput } from "../../lib/numberInput";
+import { listTaxes } from "../../lib/posApi";
+import type { ActiveSaleDraft, HeldTicket, Product, TaxOption } from "../../types";
 
 export const functionKeys = [
   { key: "F1", label: "Ticket", title: "Cobrar e imprimir ticket" },
@@ -106,6 +108,105 @@ export function ShortcutHelp({ onClose }: { onClose: () => void }) {
             </div>
           ))}
         </div>
+      </section>
+    </div>
+  );
+}
+
+export function QuickSaleModal({
+  onCancel,
+  onConfirm,
+  showToast,
+}: {
+  onCancel: () => void;
+  onConfirm: (input: { name: string; quantity: number; price: number; taxRate: number }) => void;
+  showToast: (message: string) => void;
+}) {
+  const [taxes, setTaxes] = useState<TaxOption[]>([]);
+  const [selectedTaxIds, setSelectedTaxIds] = useState<number[]>([]);
+  const [name, setName] = useState("");
+  const [quantity, setQuantity] = useState("1");
+  const [price, setPrice] = useState("");
+  const nameRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    window.setTimeout(() => nameRef.current?.focus(), 40);
+    listTaxes()
+      .then((options) => setTaxes(options.filter((tax) => tax.is_active && tax.rate > 0)))
+      .catch((error) => showToast(String(error)));
+  }, [showToast]);
+
+  const quantityValue = Number(quantity.replace(",", "."));
+  const priceValue = Number(price.replace(",", "."));
+  const taxRate = taxes
+    .filter((tax) => selectedTaxIds.includes(tax.id))
+    .reduce((sum, tax) => sum + tax.rate, 0);
+  const valid =
+    name.trim().length > 0 &&
+    Number.isFinite(quantityValue) && quantityValue > 0 &&
+    Number.isFinite(priceValue) && priceValue > 0;
+  const total = valid ? priceValue * quantityValue : 0;
+
+  const toggleTax = (id: number) => {
+    setSelectedTaxIds((current) =>
+      current.includes(id) ? current.filter((item) => item !== id) : [...current, id],
+    );
+  };
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    if (valid) onConfirm({ name: name.trim(), quantity: quantityValue, price: priceValue, taxRate });
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="ticket-name-modal" role="dialog" aria-modal="true" aria-label="Venta rapida sin catalogo">
+        <div className="modal-title">
+          <PackagePlus size={22} />
+          <div>
+            <h2>Producto fuera de catalogo</h2>
+            <p>Vende un producto sin agregarlo. Precio con impuestos incluidos.</p>
+          </div>
+        </div>
+        <form className="dialog-form" onSubmit={submit}>
+          <label>
+            Nombre
+            <input ref={nameRef} value={name} onChange={(event) => setName(event.target.value)} placeholder="Ej. Producto suelto" />
+          </label>
+          <div className="quick-sale-grid">
+            <label>
+              Cantidad
+              <input value={quantity} inputMode="decimal" onFocus={selectNumericInput} onChange={(event) => setQuantity(event.target.value)} />
+            </label>
+            <label>
+              Precio (con impuestos)
+              <input value={price} inputMode="decimal" onFocus={selectNumericInput} onChange={(event) => setPrice(event.target.value)} placeholder="0.00" />
+            </label>
+          </div>
+          <div className="quick-sale-taxes">
+            <span>Impuestos aplicados</span>
+            {taxes.length === 0 ? (
+              <small className="muted-copy">Sin impuestos configurados</small>
+            ) : (
+              <div className="quick-sale-tax-list">
+                {taxes.map((tax) => (
+                  <label key={tax.id} className="quick-sale-tax">
+                    <input type="checkbox" checked={selectedTaxIds.includes(tax.id)} onChange={() => toggleTax(tax.id)} />
+                    <span>{tax.name}</span>
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="weight-prompt-total">
+            <span>Total</span>
+            <strong>{money(total)}</strong>
+          </div>
+          <div className="modal-actions">
+            <button className="ghost-button" type="button" onClick={onCancel}>Cancelar</button>
+            <button className="primary-button" type="submit" disabled={!valid}>Agregar al carrito</button>
+          </div>
+        </form>
       </section>
     </div>
   );

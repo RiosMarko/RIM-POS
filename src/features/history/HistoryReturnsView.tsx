@@ -1,11 +1,12 @@
 import { AlertTriangle, History, RotateCcw, Search } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { AdminGate } from "../auth/AuthScreens";
+import { SaleTicketModal } from "../cash/CashModals";
 import { formatTimeMx } from "../../lib/date";
 import { money } from "../../lib/money";
 import { selectNumericInput } from "../../lib/numberInput";
-import { listSaleLineHistory, returnSaleItem } from "../../lib/posApi";
-import type { SaleLineHistory } from "../../types";
+import { listCashierOptions, listSaleLineHistory, returnSaleItem } from "../../lib/posApi";
+import type { CashierOption, SaleLineHistory } from "../../types";
 
 function todayIso() {
   const now = new Date();
@@ -88,10 +89,12 @@ export function HistoryReturnsView({
   const [day, setDay] = useState(todayIso());
   const [cashierFilter, setCashierFilter] = useState<number | "all">("all");
   const [lines, setLines] = useState<SaleLineHistory[]>([]);
+  const [cashiers, setCashiers] = useState<CashierOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [productQuery, setProductQuery] = useState("");
   const [returnDraft, setReturnDraft] = useState<ReturnDraft | null>(null);
   const [returnAdminDraft, setReturnAdminDraft] = useState<ReturnDraft | null>(null);
+  const [ticketSaleId, setTicketSaleId] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -108,17 +111,12 @@ export function HistoryReturnsView({
     load();
   }, [load]);
 
-  const cashiers = useMemo(() => {
-    const map = new Map<number, string>();
-    lines.forEach((line) => map.set(line.cashier_id, line.cashier_name));
-    return Array.from(map, ([id, name]) => ({ id, name }));
-  }, [lines]);
-
   useEffect(() => {
-    if (cashierFilter !== "all" && !cashiers.some((cashier) => cashier.id === cashierFilter)) {
-      setCashierFilter("all");
-    }
-  }, [cashiers, cashierFilter]);
+    // Every active cashier, not just those who sold on the selected day.
+    listCashierOptions().catch((error) => showToast(String(error))).then((result) => {
+      if (result) setCashiers(result);
+    });
+  }, [showToast]);
 
   const visibleLines = useMemo(() => {
     const term = productQuery.trim().toLowerCase();
@@ -225,27 +223,44 @@ export function HistoryReturnsView({
                 <span className={`pay-tag pay-${line.payment_method.toLowerCase()}`}>{line.payment_method}</span>
                 <span>{formatTimeMx(line.created_at)}</span>
                 <span>{line.cashier_name}</span>
-                <button
-                  className="danger-button mini"
-                  type="button"
-                  disabled={!canReturn}
-                  title={
-                    !line.returnable
-                      ? "Turno cerrado: registra la devolucion en el turno actual"
-                      : remaining <= 1e-6
-                        ? "Articulo ya devuelto por completo"
-                        : "Devolver este articulo"
-                  }
-                  onClick={() => setReturnDraft({ line, quantity: String(remaining), reason: "Devolucion" })}
-                >
-                  <RotateCcw size={14} />
-                  Devolver
-                </button>
+                <div className="history-row-actions">
+                  <button
+                    className="ghost-button mini"
+                    type="button"
+                    onClick={() => setTicketSaleId(line.sale_id)}
+                  >
+                    Ver ticket
+                  </button>
+                  <button
+                    className="danger-button mini"
+                    type="button"
+                    disabled={!canReturn}
+                    title={
+                      !line.returnable
+                        ? "Turno cerrado: registra la devolucion en el turno actual"
+                        : remaining <= 1e-6
+                          ? "Articulo ya devuelto por completo"
+                          : "Devolver este articulo"
+                    }
+                    onClick={() => setReturnDraft({ line, quantity: String(remaining), reason: "Devolucion" })}
+                  >
+                    <RotateCcw size={12} />
+                    Devolver
+                  </button>
+                </div>
               </div>
             );
           })
         )}
       </div>
+
+      {ticketSaleId !== null && (
+        <SaleTicketModal
+          saleId={ticketSaleId}
+          onClose={() => setTicketSaleId(null)}
+          showToast={showToast}
+        />
+      )}
 
       {returnDraft && (
         <ReturnItemModal

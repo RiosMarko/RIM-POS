@@ -11,7 +11,7 @@ export function SettingsView({
   onTaxModeChange,
 }: {
   showToast: (message: string) => void;
-  onTaxModeChange: (mode: { enabled: boolean; pricesIncludeTax: boolean }) => void;
+  onTaxModeChange: (mode: { enabled: boolean; pricesIncludeTax: boolean; roundTotalUp?: boolean }) => void;
 }) {
   const [printer, setPrinter] = useState("mock-printer-80mm");
   const [cutPrinter, setCutPrinter] = useState("");
@@ -24,6 +24,7 @@ export function SettingsView({
   const [taxDefaultRate, setTaxDefaultRate] = useState(0.16);
   const [taxPricesIncludeTax, setTaxPricesIncludeTax] = useState(true);
   const [taxShowBreakdown, setTaxShowBreakdown] = useState(true);
+  const [roundTotalUp, setRoundTotalUp] = useState(true);
   const [taxAutoApply, setTaxAutoApply] = useState(true);
   const [ticketStoreName, setTicketStoreName] = useState("RIM-POS");
   const [ticketHeader, setTicketHeader] = useState("Abarrotes y miscelanea");
@@ -72,6 +73,7 @@ export function SettingsView({
     "ticket_extra_lines",
     "ticket_copies",
     "ticket_escpos",
+    "total_round_up",
   ], []);
 
   const printers = useMemo(() => devices.filter((device) => device.device_type === "printer"), [devices]);
@@ -141,6 +143,13 @@ export function SettingsView({
     }
   }, [drawer, printer, scale, scanNetwork, showToast]);
 
+  // Number("") is 0, so an empty stored value would break baud/width/copies.
+  const numberSetting = (value: string | null | undefined, fallback: number) => {
+    if (value === null || value === undefined || value.trim() === "") return fallback;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  };
+
   useEffect(() => {
     setCardTerminals(loadCardTerminals());
     getSettings(settingsKeys)
@@ -178,29 +187,31 @@ export function SettingsView({
         setCutPrinter(nextCutPrinter || "");
         setWorkstationId(nextWorkstationId || "CAJA-1");
         setScale(nextHardware.scale);
-        setScaleBaudRate(Number(nextScaleBaudRate ?? 9600));
+        setScaleBaudRate(numberSetting(nextScaleBaudRate, 9600));
         setDrawer(nextHardware.drawer);
         const enabled = nextTaxEnabled !== "false";
         setTaxEnabled(enabled);
         setTaxCountry(nextTaxCountry || "MX");
-        setTaxDefaultRate(Number(nextTaxDefaultRate ?? 0.16));
+        setTaxDefaultRate(numberSetting(nextTaxDefaultRate, 0.16));
         setTaxPricesIncludeTax(nextTaxPricesIncludeTax !== "false");
         setTaxShowBreakdown(nextTaxShowBreakdown !== "false");
         setTaxAutoApply(nextTaxAutoApply !== "false");
         setTicketStoreName(nextTicketStoreName || "RIM-POS");
         setTicketHeader(nextTicketHeader || "Abarrotes y miscelanea");
         setTicketFooter(nextTicketFooter || "Gracias por su compra");
-        setTicketWidth(Number(nextTicketWidth ?? 32));
+        setTicketWidth(numberSetting(nextTicketWidth, 32));
         setTicketShowLogo(nextTicketShowLogo !== "false");
         setTicketShowDate(nextTicketShowDate !== "false");
         setTicketShowCashier(nextTicketShowCashier !== "false");
         setTicketShowBarcode(nextTicketShowBarcode === "true");
         setTicketShowItemCount(nextTicketShowItemCount !== "false");
-        setTicketStartLines(Number(nextTicketStartLines ?? 0));
-        setTicketExtraLines(Number(nextTicketExtraLines ?? 3));
-        setTicketCopies(Number(nextTicketCopies ?? 1));
+        setTicketStartLines(numberSetting(nextTicketStartLines, 0));
+        setTicketExtraLines(numberSetting(nextTicketExtraLines, 3));
+        setTicketCopies(numberSetting(nextTicketCopies, 1));
         setTicketEscpos(settings.ticket_escpos !== "false");
-        onTaxModeChange({ enabled, pricesIncludeTax: nextTaxPricesIncludeTax !== "false" });
+        const nextRoundTotalUp = settings.total_round_up !== "false";
+        setRoundTotalUp(nextRoundTotalUp);
+        onTaxModeChange({ enabled, pricesIncludeTax: nextTaxPricesIncludeTax !== "false", roundTotalUp: nextRoundTotalUp });
       })
       .catch((error) => showToast(String(error)));
   }, [onTaxModeChange, settingsKeys, showToast]);
@@ -233,7 +244,7 @@ export function SettingsView({
     while (last >= first && lines[last].trim() === "") last -= 1;
     const startLines = clampTicketLines(first);
     const extraLines = clampTicketLines(lines.length - 1 - last);
-    const folioIndex = lines.findIndex((lineText) => lineText.startsWith("Folio 2026-06-001"));
+    const folioIndex = lines.findIndex((lineText) => lineText.startsWith("Folio 4581"));
     const headerStart = startLines + (ticketShowLogo ? 1 : 0);
     const nextHeader = folioIndex > headerStart ? lines.slice(headerStart, folioIndex).join("\n") : ticketHeader;
     let itemCountIndex = -1;
@@ -291,6 +302,7 @@ export function SettingsView({
         ticket_extra_lines: String(previewSettings?.extraLines ?? ticketExtraLines),
         ticket_copies: String(ticketCopies),
         ticket_escpos: String(ticketEscpos),
+        total_round_up: String(roundTotalUp),
       });
       if (previewSettings) {
         setTicketHeader(previewSettings.header);
@@ -299,7 +311,7 @@ export function SettingsView({
         setTicketExtraLines(previewSettings.extraLines);
         setTicketPreviewDirty(false);
       }
-      onTaxModeChange({ enabled: taxEnabled, pricesIncludeTax: taxPricesIncludeTax });
+      onTaxModeChange({ enabled: taxEnabled, pricesIncludeTax: taxPricesIncludeTax, roundTotalUp });
       showToast("Configuracion guardada");
     } catch (error) {
       showToast(String(error));
@@ -363,7 +375,7 @@ export function SettingsView({
       ...Array.from({ length: Math.max(0, Math.min(8, ticketStartLines)) }, () => ""),
       ...(ticketShowLogo ? [ticketStoreName || "RIM-POS"] : []),
       ...(ticketHeader.trim() ? ticketHeader.split("\n") : []),
-      "Folio 2026-06-001",
+      "Folio 4581",
       ...(ticketShowDate ? ["2026-06-20 08:20"] : []),
       ...(ticketShowCashier ? ["Cajero: Admin"] : []),
       separator,
@@ -475,6 +487,10 @@ export function SettingsView({
                   <label className="toggle-row">
                     <input type="checkbox" checked={taxShowBreakdown} onChange={(event) => setTaxShowBreakdown(event.target.checked)} disabled={!taxEnabled} />
                     Desglosar impuestos
+                  </label>
+                  <label className="toggle-row">
+                    <input type="checkbox" checked={roundTotalUp} onChange={(event) => setRoundTotalUp(event.target.checked)} />
+                    Redondeo total a pesos enteros
                   </label>
                 </div>
               </div>
@@ -671,9 +687,13 @@ export function SettingsView({
               Incluir impresoras de red (mas lento, escanea la red local)
             </label>
             {unconfiguredDevices.length > 0 && (
-              <div className="muted-note">
-                Detectados sin driver instalado: {unconfiguredDevices.map((device) => device.name).join(", ")}.
-                Instala el driver del fabricante en Windows para poder usarlos.
+              <div className="muted-note unconfigured-device-list">
+                <strong>Detectados sin configurar:</strong>
+                {unconfiguredDevices.map((device) => (
+                  <div key={`${device.device_type}-${device.id}`}>
+                    <strong>{device.name}</strong>: {device.detail}
+                  </div>
+                ))}
               </div>
             )}
           </section>

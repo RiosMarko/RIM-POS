@@ -45,6 +45,8 @@ pub fn next_monthly_seq(current_max: i64) -> i64 {
     current_max + 1
 }
 
+// Legacy folio format (pre global-consecutive); kept for reference and tests.
+#[allow(dead_code)]
 pub fn visible_monthly_folio(period: &str, monthly_seq: i64) -> String {
     format!("{period}-{monthly_seq:03}")
 }

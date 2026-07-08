@@ -1,6 +1,7 @@
 import { History, LockKeyhole, LogOut, ShoppingCart } from "lucide-react";
 import type { ReactNode } from "react";
 import rimPosLogo from "../../assets/rim-pos-icon.png";
+import { useClock } from "../../hooks/useClock";
 import { formatLongDateMx } from "../../lib/date";
 import { money } from "../../lib/money";
 import { hasPermission } from "../../navigation";
@@ -8,8 +9,19 @@ import type { NavItem, ViewKey } from "../../navigation";
 import type { DashboardSummary, UserSession } from "../../types";
 import { WindowTitlebar } from "../window/WindowChrome";
 
+// Isolated so the 1-second clock tick re-renders only this footer text, never
+// the AppShell tree (cart, views) around it.
+function FooterClock() {
+  const clock = useClock();
+  return (
+    <>
+      <span>{formatLongDateMx(clock)}</span>
+      <strong>{clock.toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</strong>
+    </>
+  );
+}
+
 export function AppShell({
-  clock,
   session,
   summary,
   currentView,
@@ -20,7 +32,6 @@ export function AppShell({
   logout,
   children,
 }: {
-  clock: Date;
   session: UserSession;
   summary: DashboardSummary | null;
   currentView: ViewKey;
@@ -35,7 +46,7 @@ export function AppShell({
 
   return (
     <>
-      <WindowTitlebar clock={clock} roleLabel={roleLabel} sessionName={session.name} />
+      <WindowTitlebar roleLabel={roleLabel} sessionName={session.name} />
       <div className="app-shell">
         <aside className="sidebar">
           <div className="brand-block">
@@ -89,8 +100,7 @@ export function AppShell({
           {children}
 
           <footer className="status-clock" aria-live="polite">
-            <span>{formatLongDateMx(clock)}</span>
-            <strong>{clock.toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</strong>
+            <FooterClock />
             <button
               className={`status-clock-action ${currentView === "history" ? "active" : ""}`}
               type="button"

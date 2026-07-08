@@ -1,6 +1,6 @@
 use crate::auth::require_active_user;
 use crate::backend::{require_permission, AppState, CommandResult};
-use crate::core::now_iso;
+use crate::core::{now_iso, round_money};
 use crate::models::*;
 use crate::validation::{validate_non_negative, validate_required_text};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
@@ -112,14 +112,13 @@ pub(crate) fn tax_rate_for_ids(conn: &Connection, tax_ids: &[i64], fallback: f64
     if tax_ids.is_empty() {
         return Ok(fallback.max(0.0));
     }
+    let mut stmt = conn
+        .prepare_cached("SELECT rate FROM taxes WHERE id = ?1 AND is_active = 1")
+        .map_err(|error| error.to_string())?;
     let mut total = 0.0;
     for tax_id in tax_ids {
-        let rate: f64 = conn
-            .query_row(
-                "SELECT rate FROM taxes WHERE id = ?1 AND is_active = 1",
-                params![tax_id],
-                |row| row.get(0),
-            )
+        let rate: f64 = stmt
+            .query_row(params![tax_id], |row| row.get(0))
             .map_err(|_| format!("Impuesto no disponible: {tax_id}"))?;
         total += rate;
     }
@@ -127,19 +126,20 @@ pub(crate) fn tax_rate_for_ids(conn: &Connection, tax_ids: &[i64], fallback: f64
 }
 
 pub(crate) fn save_product_taxes(conn: &Connection, product_id: i64, tax_ids: &[i64]) -> CommandResult<()> {
-    conn.execute(
-        "DELETE FROM product_taxes WHERE product_id = ?1",
-        params![product_id],
-    )
-    .map_err(|error| error.to_string())?;
+    // prepare_cached: this runs once per row during bulk imports, so reusing the
+    // compiled statements avoids re-parsing the same SQL thousands of times.
+    conn.prepare_cached("DELETE FROM product_taxes WHERE product_id = ?1")
+        .and_then(|mut stmt| stmt.execute(params![product_id]))
+        .map_err(|error| error.to_string())?;
+    let mut insert = conn
+        .prepare_cached("INSERT INTO product_taxes (product_id, tax_id) VALUES (?1, ?2)")
+        .map_err(|error| error.to_string())?;
     let mut seen = HashSet::new();
     for tax_id in tax_ids {
         if seen.insert(*tax_id) {
-            conn.execute(
-                "INSERT INTO product_taxes (product_id, tax_id) VALUES (?1, ?2)",
-                params![product_id, tax_id],
-            )
-            .map_err(|error| error.to_string())?;
+            insert
+                .execute(params![product_id, tax_id])
+                .map_err(|error| error.to_string())?;
         }
     }
     Ok(())
@@ -160,19 +160,15 @@ pub(crate) fn existing_product_id_for_import(
     barcode: &str,
 ) -> CommandResult<Option<i64>> {
     let sku_id = conn
-        .query_row(
-            "SELECT id FROM products WHERE lower(sku) = lower(?1)",
-            params![sku],
-            |row| row.get::<_, i64>(0),
-        )
+        .prepare_cached("SELECT id FROM products WHERE lower(sku) = lower(?1)")
+        .map_err(|error| error.to_string())?
+        .query_row(params![sku], |row| row.get::<_, i64>(0))
         .optional()
         .map_err(|error| error.to_string())?;
     let barcode_id = conn
-        .query_row(
-            "SELECT id FROM products WHERE barcode = ?1",
-            params![barcode],
-            |row| row.get::<_, i64>(0),
-        )
+        .prepare_cached("SELECT id FROM products WHERE barcode = ?1")
+        .map_err(|error| error.to_string())?
+        .query_row(params![barcode], |row| row.get::<_, i64>(0))
         .optional()
         .map_err(|error| error.to_string())?;
     match (sku_id, barcode_id) {
@@ -297,12 +293,15 @@ pub(crate) fn import_products_with_conn(
         let tax_rate = tax_rate_for_ids(&tx, &input.tax_ids, input.tax_rate)?;
         let id = match input.id {
             Some(id) => {
-                tx.execute(
+                tx.prepare_cached(
                     "UPDATE products
                      SET sku = ?1, barcode = ?2, name = ?3, category = ?4, unit = ?5, price = ?6,
                          wholesale_price = ?7, cost = ?8, stock = ?9, min_stock = ?10, tax_rate = ?11,
                          active = ?12, search_text = ?13, updated_at = ?14
                      WHERE id = ?15",
+                )
+                .map_err(|error| error.to_string())?
+                .execute(
                     params![
                         input.sku,
                         input.barcode,
@@ -326,10 +325,13 @@ pub(crate) fn import_products_with_conn(
                 id
             }
             None => {
-                tx.execute(
+                tx.prepare_cached(
                     "INSERT INTO products
                      (sku, barcode, name, category, unit, price, wholesale_price, cost, stock, min_stock, tax_rate, active, search_text, created_at, updated_at)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)",
+                )
+                .map_err(|error| error.to_string())?
+                .execute(
                     params![
                         input.sku,
                         input.barcode,
@@ -407,7 +409,7 @@ pub(crate) fn product_search_with_conn(
             .prepare(
                 "SELECT id, sku, barcode, name, category, unit, price, wholesale_price, cost, stock, min_stock, tax_rate, active
                  FROM products
-                 WHERE active = 1
+                 WHERE active = 1 AND catalog_hidden = 0
                  ORDER BY lower(barcode), name
                  LIMIT ?1 OFFSET ?2",
             )
@@ -447,7 +449,7 @@ pub(crate) fn product_search_with_conn(
         .prepare(
             "SELECT id, sku, barcode, name, category, unit, price, wholesale_price, cost, stock, min_stock, tax_rate, active
              FROM products
-             WHERE active = 1
+             WHERE active = 1 AND catalog_hidden = 0
                AND (search_text LIKE ?1
                     OR lower(name) LIKE ?2
                     OR lower(category) LIKE ?2
@@ -473,6 +475,47 @@ pub(crate) fn product_search_with_conn(
         .map_err(|error| error.to_string())?;
     hydrate_products_taxes(conn, &mut products)?;
     Ok(products)
+}
+
+/// Creates a hidden "quick sale" product for selling an item that is not in the
+/// catalog, without cataloging it. It is a real row (so it works with sales,
+/// tickets and reports) but flagged catalog_hidden so it never shows in
+/// browse/search listings.
+#[tauri::command]
+pub(crate) fn quick_product_create(
+    state: State<'_, AppState>,
+    actor_id: i64,
+    name: String,
+    price: f64,
+    tax_rate: f64,
+) -> CommandResult<Product> {
+    let conn = state.db.lock().map_err(|error| error.to_string())?;
+    require_active_user(&conn, actor_id)?;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Nombre requerido".into());
+    }
+    validate_non_negative(price, "Precio invalido")?;
+    let tax_rate = if tax_rate.is_finite() && tax_rate > 0.0 { tax_rate } else { 0.0 };
+    let now = now_iso();
+    let token = format!(
+        "VAR{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_nanos())
+            .unwrap_or(0)
+    );
+    let category = "Venta rapida";
+    let search = product_search_text(&token, &token, name, category, "pieza");
+    conn.execute(
+        "INSERT INTO products
+         (sku, barcode, name, category, unit, price, wholesale_price, cost, stock, min_stock, tax_rate, active, catalog_hidden, search_text, created_at, updated_at)
+         VALUES (?1, ?1, ?2, ?3, 'pieza', ?4, NULL, 0, 1000000, 0, ?5, 1, 1, ?6, ?7, ?7)",
+        params![token, name, category, round_money(price), tax_rate, search, now],
+    )
+    .map_err(|error| error.to_string())?;
+    let id = conn.last_insert_rowid();
+    get_product(&conn, id)
 }
 
 #[tauri::command]

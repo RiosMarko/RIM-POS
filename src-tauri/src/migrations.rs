@@ -24,12 +24,28 @@ pub(crate) fn init_db(app: &AppHandle) -> CommandResult<(Connection, PathBuf)> {
     configure_connection(&conn)?;
     migrate(&conn)?;
     seed_demo(&conn)?;
+    cleanup_orphan_quick_products(&conn);
     let db_path = app
         .path()
         .app_data_dir()
         .map_err(|error| format!("No se pudo localizar app data: {error}"))?
         .join("pos-abarrotes.sqlite3");
     Ok((conn, db_path))
+}
+
+/// Deletes hidden quick-sale products that were never actually sold and are over
+/// a day old (created when opening the off-catalog panel but the sale was
+/// abandoned). Best-effort: failures must not block startup.
+pub(crate) fn cleanup_orphan_quick_products(conn: &Connection) {
+    let _ = conn.execute(
+        "DELETE FROM products
+         WHERE catalog_hidden = 1
+           AND NOT EXISTS (SELECT 1 FROM sale_items si WHERE si.product_id = products.id)
+           AND NOT EXISTS (SELECT 1 FROM purchase_items pi WHERE pi.product_id = products.id)
+           AND NOT EXISTS (SELECT 1 FROM inventory_movements im WHERE im.product_id = products.id)
+           AND julianday(created_at) < julianday('now', '-1 day')",
+        [],
+    );
 }
 
 pub(crate) fn configure_connection(conn: &Connection) -> CommandResult<()> {
@@ -318,6 +334,8 @@ pub(crate) fn migrate(conn: &Connection) -> CommandResult<()> {
 
         CREATE INDEX IF NOT EXISTS idx_sale_returns_shift ON sale_returns(shift_id);
         CREATE INDEX IF NOT EXISTS idx_sale_returns_item ON sale_returns(sale_item_id);
+        CREATE INDEX IF NOT EXISTS idx_sale_returns_sale ON sale_returns(sale_id);
+        CREATE INDEX IF NOT EXISTS idx_sale_returns_product ON sale_returns(product_id);
 
         CREATE TABLE IF NOT EXISTS purchases (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -459,6 +477,12 @@ pub(crate) fn migrate(conn: &Connection) -> CommandResult<()> {
     let _ = conn.execute("ALTER TABLE products ADD COLUMN sat_product_key TEXT", []);
     let _ = conn.execute("ALTER TABLE products ADD COLUMN sat_unit_key TEXT", []);
     let _ = conn.execute("ALTER TABLE products ADD COLUMN wholesale_price REAL", []);
+    // Quick-sale products (sold at the register without cataloging them) are kept
+    // out of catalog/search listings via this flag while still being real rows.
+    let _ = conn.execute(
+        "ALTER TABLE products ADD COLUMN catalog_hidden INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
     let _ = conn.execute(
         "ALTER TABLE products ADD COLUMN search_text TEXT NOT NULL DEFAULT ''",
         [],
@@ -480,6 +504,11 @@ pub(crate) fn migrate(conn: &Connection) -> CommandResult<()> {
     );
     let _ = conn.execute(
         "ALTER TABLE sales ADD COLUMN monthly_seq INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    // Amount added to round the charged total up to whole pesos.
+    let _ = conn.execute(
+        "ALTER TABLE sales ADD COLUMN rounding REAL NOT NULL DEFAULT 0",
         [],
     );
     let _ = conn.execute(

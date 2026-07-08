@@ -8,6 +8,7 @@ import type {
   BackupFile,
   BackupRestoreResult,
   BackupResult,
+  CashierOption,
   CashCount,
   CashMovement,
   CashSession,
@@ -33,6 +34,7 @@ import type {
   SaleLineHistory,
   SaleListItem,
   SaleReceipt,
+  SaleTicketDetail,
   ScaleReading,
   ShiftCutSnapshot,
   Supplier,
@@ -451,6 +453,15 @@ export async function listUsers(): Promise<UserAccount[]> {
   return mockUsers;
 }
 
+// Every active cashier (not just those who sold today), for filter dropdowns.
+// Any active user can call this (unlike listUsers, which is admin-only).
+export async function listCashierOptions(): Promise<CashierOption[]> {
+  if (isTauri()) {
+    return call<CashierOption[]>("cashier_options", { actorId: requireActorId() });
+  }
+  return mockUsers.filter((user) => user.active).map((user) => ({ id: user.id, name: user.name }));
+}
+
 export async function createUser(input: {
   name: string;
   pin: string;
@@ -572,6 +583,33 @@ export async function listTaxes(): Promise<TaxOption[]> {
     return call<TaxOption[]>("tax_list", { actorId: requireActorId() });
   }
   return demoTaxes;
+}
+
+export async function quickProductCreate(input: { name: string; price: number; tax_rate: number }): Promise<Product> {
+  if (isTauri()) {
+    return call<Product>("quick_product_create", {
+      actorId: requireActorId(),
+      name: input.name,
+      price: input.price,
+      taxRate: input.tax_rate,
+    });
+  }
+  return {
+    id: -Date.now(),
+    sku: "VAR",
+    barcode: "",
+    name: input.name,
+    category: "Venta rapida",
+    unit: "pieza",
+    price: input.price,
+    wholesale_price: null,
+    cost: 0,
+    stock: 1000000,
+    min_stock: 0,
+    tax_rate: input.tax_rate,
+    tax_ids: [],
+    active: true,
+  };
 }
 
 export async function createInvoiceDraft(saleId: number, customerId?: number | null): Promise<InvoiceDraft> {
@@ -842,6 +880,30 @@ export async function listSales(): Promise<SaleListItem[]> {
     return call<SaleListItem[]>("sale_list", { actorId: requireActorId(), limit: 80 });
   }
   return mockSales;
+}
+
+export async function getSaleDetail(saleId: number): Promise<SaleTicketDetail> {
+  if (isTauri()) {
+    return call<SaleTicketDetail>("sale_detail", { actorId: requireActorId(), saleId });
+  }
+  const sale = mockSales.find((candidate) => candidate.id === saleId);
+  if (!sale) throw new Error("Venta no encontrada");
+  return {
+    sale_id: sale.id,
+    folio: sale.folio,
+    status: sale.status,
+    cashier_name: sale.cashier_name,
+    created_at: sale.created_at,
+    subtotal: sale.total,
+    tax: 0,
+    discount: 0,
+    rounding: 0,
+    total: sale.total,
+    paid: sale.paid,
+    change_due: 0,
+    items: [],
+    payments: [],
+  };
 }
 
 export async function listSaleLineHistory(input: { day?: string; limit?: number } = {}): Promise<SaleLineHistory[]> {
@@ -1276,6 +1338,7 @@ export async function getAppBootstrap(): Promise<AppBootstrap> {
     held_tickets: await listHeldTickets(),
     tax_enabled: mockBoolSetting("tax_enabled", true),
     tax_prices_include_tax: mockBoolSetting("tax_prices_include_tax", true),
+    total_round_up: mockBoolSetting("total_round_up", true),
     unclean_shutdown: false,
   };
 }

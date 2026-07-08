@@ -51,7 +51,7 @@ export function SaleView({
   query: string;
   products: Product[];
   cart: CartLine[];
-  totals: ReturnType<typeof cartTotals>;
+  totals: ReturnType<typeof cartTotals> & { rounding?: number };
   paid: number;
   shortage: number;
   change: number;
@@ -94,6 +94,8 @@ export function SaleView({
   const normalizedQuery = useMemo(() => query.trim().toLowerCase(), [query]);
   const visibleSuggestions = useMemo(() => {
     if (!normalizedQuery) return [];
+    // "0" alone is the shortcut for the off-catalog quick sale, not a search.
+    if (normalizedQuery === "0") return [];
     return products.filter((product) =>
         product.name.toLowerCase().includes(normalizedQuery) ||
         product.category.toLowerCase().includes(normalizedQuery) ||
@@ -302,6 +304,12 @@ export function SaleView({
             <span>Impuestos</span>
             <strong>{money(totals.tax)}</strong>
           </div>
+          {(totals.rounding ?? 0) > 0 && (
+            <div>
+              <span>Redondeo</span>
+              <strong>{money(totals.rounding ?? 0)}</strong>
+            </div>
+          )}
           <div>
             <span>Pagado</span>
             <strong>{money(paid)}</strong>

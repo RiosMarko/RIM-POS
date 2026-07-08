@@ -96,6 +96,39 @@ export type SaleReceipt = {
   created_at: string;
 };
 
+export type SaleTicketItem = {
+  product_name: string;
+  unit: string;
+  quantity: number;
+  returned_quantity: number;
+  unit_price: number;
+  discount: number;
+  line_total: number;
+};
+
+export type SaleTicketPayment = {
+  method: string;
+  amount: number;
+  reference: string | null;
+};
+
+export type SaleTicketDetail = {
+  sale_id: number;
+  folio: string;
+  status: string;
+  cashier_name: string;
+  created_at: string;
+  subtotal: number;
+  tax: number;
+  discount: number;
+  rounding: number;
+  total: number;
+  paid: number;
+  change_due: number;
+  items: SaleTicketItem[];
+  payments: SaleTicketPayment[];
+};
+
 export type SaleLineHistory = {
   sale_id: number;
   sale_item_id: number;
@@ -334,6 +367,7 @@ export type AppBootstrap = {
   held_tickets: HeldTicket[];
   tax_enabled: boolean;
   tax_prices_include_tax: boolean;
+  total_round_up: boolean;
   unclean_shutdown: boolean;
 };
 
@@ -510,4 +544,9 @@ export type UserAccount = {
   active: boolean;
   created_at: string;
   permissions: PermissionKey[];
+};
+
+export type CashierOption = {
+  id: number;
+  name: string;
 };
