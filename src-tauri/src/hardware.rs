@@ -121,10 +121,27 @@ fn command_lines(program: &str, args: &[&str]) -> Vec<String> {
 }
 
 fn command_lines_timeout(program: &str, args: &[&str], timeout_ms: u64) -> Vec<String> {
+    command_output_lines(program, args, timeout_ms, true)
+}
+
+/// Like command_lines_timeout, but keeps whatever stdout the process already
+/// produced even if it exits with a non-zero status. A multi-statement
+/// diagnostic script (the Windows device scan runs 5 independent queries in
+/// one process) can have a *later* statement fail -- missing cmdlet, unknown
+/// WMI class, a permissions hiccup -- while earlier statements already printed
+/// good data. Requiring success discarded that good data too, so one flaky
+/// query silently blanked out printers (even "Microsoft Print to PDF"/"Fax",
+/// which come from the very first statement) that had already been found.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn command_lines_best_effort(program: &str, args: &[&str], timeout_ms: u64) -> Vec<String> {
+    command_output_lines(program, args, timeout_ms, false)
+}
+
+fn command_output_lines(program: &str, args: &[&str], timeout_ms: u64, require_success: bool) -> Vec<String> {
     let Ok(output) = command_output(program, args, timeout_ms) else {
         return Vec::new();
     };
-    if !output.status.success() {
+    if require_success && !output.status.success() {
         return Vec::new();
     }
     String::from_utf8_lossy(&output.stdout)
@@ -475,7 +492,7 @@ Get-PnpDevice -PresentOnly -Class Printer | ForEach-Object { "PRINTERPNP|$($_.Fr
     // so the broader Class-Printer PnP scan below doesn't add a duplicate row
     // for the same physical printer.
     let mut spooler_printer_names: HashSet<String> = HashSet::new();
-    for line in command_lines_timeout("powershell", &powershell_args(SCAN_SCRIPT), 9000) {
+    for line in command_lines_best_effort("powershell", &powershell_args(SCAN_SCRIPT), 9000) {
         let parts: Vec<&str> = line.split('|').collect();
         let Some(tag) = parts.first().copied() else {
             continue;
@@ -990,7 +1007,10 @@ pub fn read_serial_scale(
 
 #[cfg(test)]
 mod tests {
-    use super::{command_lines, network_endpoint, parse_lpinfo_direct_line, parse_scale_weight};
+    use super::{
+        command_lines, command_lines_best_effort, command_lines_timeout, network_endpoint,
+        parse_lpinfo_direct_line, parse_scale_weight,
+    };
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     // Regression test for a real deadlock: a child process writing more than
@@ -1019,6 +1039,34 @@ mod tests {
         // enough lines to exceed the pipe buffer, must come back whole.
         let lines = command_lines("powershell", &["-NoProfile", "-Command", "1..20000 | ForEach-Object { $_ }"]);
         assert_eq!(lines.len(), 20000, "expected all lines, not a timeout-truncated empty result");
+    }
+
+    // Regression test for a second real bug found alongside the deadlock: the
+    // Windows device scan runs 5 independent PowerShell statements in one
+    // process. If a LATER statement fails (missing cmdlet, unknown WMI class,
+    // a permission hiccup) the whole process exits non-zero, and the strict
+    // command_lines_timeout wiped out stdout entirely -- even though earlier
+    // statements (e.g. the one listing "Microsoft Print to PDF"/"Fax"/every
+    // other printer) had already printed good data. command_lines_best_effort
+    // must keep that partial output instead of discarding it.
+    #[cfg(not(windows))]
+    #[test]
+    fn best_effort_keeps_stdout_when_process_exits_non_zero() {
+        let script = "echo good_line; exit 3";
+        let strict = command_lines_timeout("sh", &["-c", script], 2000);
+        assert!(strict.is_empty(), "strict variant should still discard on failure: {strict:?}");
+        let lenient = command_lines_best_effort("sh", &["-c", script], 2000);
+        assert_eq!(lenient, vec!["good_line".to_string()]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn best_effort_keeps_stdout_when_process_exits_non_zero() {
+        let script = "Write-Output 'good_line'; exit 3";
+        let strict = command_lines_timeout("powershell", &["-NoProfile", "-Command", script], 3000);
+        assert!(strict.is_empty(), "strict variant should still discard on failure: {strict:?}");
+        let lenient = command_lines_best_effort("powershell", &["-NoProfile", "-Command", script], 3000);
+        assert_eq!(lenient, vec!["good_line".to_string()]);
     }
 
     #[test]

@@ -27,6 +27,10 @@ export function getNotificationTone(message: string): NotificationTone {
     normalized.includes("cread") ||
     normalized.includes("registrad") ||
     normalized.includes("cobrada") ||
+    // Sale toast is now just "Venta <folio>" (no "cobrada"/status word), but
+    // still counts as success as long as no danger keyword matched above
+    // (an appended hardware-failure reason would have already returned danger).
+    normalized.startsWith("venta ") ||
     normalized.includes("listo") ||
     normalized.includes("abierta") ||
     normalized.includes("actualizad") ||

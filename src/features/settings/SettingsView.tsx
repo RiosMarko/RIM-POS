@@ -514,16 +514,22 @@ export function SettingsView({
                 />
                 <div className="ticket-card-note">
                   <span>En ventas con tarjeta se agrega al final (no editable):</span>
-                  <pre className="ticket-preview card-voucher">{[
-                    line,
-                    "VENTA A CREDITO",
-                    "FIRMA DEL CLIENTE",
-                    "",
-                    "",
-                    "",
-                    "_".repeat(Math.max(24, Math.min(48, ticketWidth))),
-                    "TERMINAL BANORTE-1",
-                  ].join("\n")}</pre>
+                  <pre className="ticket-preview card-voucher">{(() => {
+                    const cardWidth = Math.max(24, Math.min(48, ticketWidth));
+                    const centerLine = (value: string) =>
+                      value.length >= cardWidth ? value : " ".repeat(Math.floor((cardWidth - value.length) / 2)) + value;
+                    return [
+                      "",
+                      line,
+                      centerLine("VENTA A CREDITO"),
+                      centerLine("FIRMA DEL CLIENTE"),
+                      "",
+                      "",
+                      "",
+                      "_".repeat(cardWidth),
+                      centerLine("TERMINAL BANORTE-1"),
+                    ].join("\n");
+                  })()}</pre>
                 </div>
                 <button className="ghost-button" type="button" onClick={testPrinter}>
                   Probar impresora

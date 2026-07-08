@@ -77,7 +77,14 @@ export function usePosShortcuts({
         }
       }
       const isMacCutShortcut = event.ctrlKey && keyText === "k";
-      if (key.startsWith("F") || isMacCutShortcut) {
+      // Must be exactly F1-F12, not just start with "F": key.startsWith("F")
+      // also matched a bare capital "F" keystroke (Shift+F, Caps Lock, typing
+      // "Favor de..." in the ticket header/footer editor, any capitalized
+      // word starting with F anywhere in the app), silently eating that
+      // letter everywhere since this listener runs on the capture phase
+      // before the input/textarea ever sees it.
+      const isFunctionKey = /^F([1-9]|1[0-2])$/.test(key);
+      if (isFunctionKey || isMacCutShortcut) {
         event.preventDefault();
         event.stopPropagation();
       }

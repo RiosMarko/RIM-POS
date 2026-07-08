@@ -483,21 +483,23 @@ function App() {
         await refreshHeldTickets();
       }
       await clearActiveDraftForSession();
-      const hardwareWarnings: string[] = [];
+      // Hardware failures (printer/drawer) are only logged to the console, not
+      // shown to the cashier: the sale toast must always read just
+      // "Venta <folio> realizada", nothing about printer/drawer errors.
       if (options.printTicket !== false) {
         try {
           await printTicket(receipt.sale_id);
         } catch (error) {
-          hardwareWarnings.push(`Ticket no impreso: ${String(error)}`);
+          console.error("Ticket no impreso:", error);
         }
       }
       try {
         await openDrawer();
       } catch (error) {
-        hardwareWarnings.push(`Cajon no abrio: ${String(error)}`);
+        console.error("Cajon no abrio:", error);
       }
       await refreshSummary();
-      showToast(hardwareWarnings.length ? `Venta ${receipt.folio} cobrada. ${hardwareWarnings.join(" ")}` : `Venta ${receipt.folio} cobrada`);
+      showToast(`Venta ${receipt.folio} realizada`);
       searchRef.current?.focus();
     } catch (error) {
       showToast(String(error));

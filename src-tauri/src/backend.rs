@@ -286,6 +286,16 @@ pub(crate) fn ticket_separator(width: usize) -> String {
     "-".repeat(width.clamp(24, 48))
 }
 
+/// Left-pads a line with spaces so it sits centered within the paper width.
+/// Lines already as wide as (or wider than) the paper are left untouched.
+fn center_line(text: &str, width: usize) -> String {
+    let len = text.chars().count();
+    if len >= width {
+        return text.to_string();
+    }
+    format!("{}{}", " ".repeat((width - len) / 2), text)
+}
+
 fn receipt_text(conn: &Connection, sale_id: i64) -> CommandResult<String> {
     let width = ticket_setting_i64(conn, "ticket_width", 32, 24, 48)? as usize;
     let separator = ticket_separator(width);
@@ -308,7 +318,7 @@ fn receipt_text(conn: &Connection, sale_id: i64) -> CommandResult<String> {
             demo.push_str(&format!("{store_name}\n"));
         }
         if !header.trim().is_empty() {
-            demo.push_str(header.trim());
+            demo.push_str(&header);
             demo.push('\n');
         }
         demo.push_str("Prueba de impresora\n");
@@ -318,7 +328,7 @@ fn receipt_text(conn: &Connection, sale_id: i64) -> CommandResult<String> {
         demo.push_str(&format!("{separator}\n*** OK ***\n"));
         if !footer.trim().is_empty() {
             demo.push('\n');
-            demo.push_str(footer.trim());
+            demo.push_str(&footer);
             demo.push('\n');
         }
         demo.push_str(&"\n".repeat(extra_lines));
@@ -362,7 +372,12 @@ fn receipt_text(conn: &Connection, sale_id: i64) -> CommandResult<String> {
         text.push_str(&format!("{store_name}\n"));
     }
     if !header.trim().is_empty() {
-        text.push_str(header.trim());
+        // Push the header as typed, not trimmed: a user indenting a line with
+        // leading spaces (e.g. to hand-center a title on 32-col paper) had
+        // that indentation silently eaten here even though it displays fine
+        // in the settings preview, which never trims. Only the emptiness
+        // check needs .trim(); the printed content should not.
+        text.push_str(&header);
         text.push('\n');
     }
     text.push_str(&format!("Folio {folio}\n"));
@@ -437,7 +452,8 @@ fn receipt_text(conn: &Connection, sale_id: i64) -> CommandResult<String> {
     }
     if !footer.trim().is_empty() {
         text.push('\n');
-        text.push_str(footer.trim());
+        // Same reasoning as the header above: keep the user's own spacing.
+        text.push_str(&footer);
         text.push('\n');
     }
 
@@ -453,15 +469,18 @@ fn receipt_text(conn: &Connection, sale_id: i64) -> CommandResult<String> {
         )
         .map_err(|error| error.to_string())?;
     if card_count > 0 {
+        // One blank line of breathing room before the credit-voucher block,
+        // and every line in it centered on the paper width.
+        text.push('\n');
         text.push_str(&format!("{separator}\n"));
-        text.push_str("VENTA A CREDITO\n");
-        text.push_str("FIRMA DEL CLIENTE\n");
+        text.push_str(&format!("{}\n", center_line("VENTA A CREDITO", width)));
+        text.push_str(&format!("{}\n", center_line("FIRMA DEL CLIENTE", width)));
         text.push_str("\n\n\n");
         text.push_str(&format!("{}\n", "_".repeat(width)));
         if let Some(terminal) = card_terminal {
             let terminal = terminal.trim();
             if !terminal.is_empty() {
-                text.push_str(&format!("TERMINAL {terminal}\n"));
+                text.push_str(&format!("{}\n", center_line(&format!("TERMINAL {terminal}"), width)));
             }
         }
     }
@@ -474,13 +493,41 @@ fn receipt_text(conn: &Connection, sale_id: i64) -> CommandResult<String> {
 /// content, then a feed + partial cut (GS V B). Sent raw to the printer so CUPS
 /// does not re-paginate a 58mm ticket into a full letter-size page (the "tira
 /// larga" bug). Cut bytes are ignored by printers without an auto-cutter.
+/// Thermal/ESC-POS clones default to codepage 437 or 850, not UTF-8. Sending
+/// Rust's native UTF-8 bytes straight through makes every accented Spanish
+/// letter print as garbage (each UTF-8 continuation byte gets interpreted on
+/// its own). This maps the accented characters that actually show up in
+/// tickets (store name, product names, "Codigo", footer, etc.) to their
+/// single-byte CP850 codepoints, and falls back to the plain unaccented
+/// letter for anything else non-ASCII -- readable-without-accent beats a
+/// wrong symbol if a character isn't in the table.
+fn encode_cp850(text: &str) -> Vec<u8> {
+    text.chars()
+        .map(|character| match character {
+            'á' => 0xA0, 'é' => 0x82, 'í' => 0xA1, 'ó' => 0xA2, 'ú' => 0xA3,
+            'Á' => 0xB5, 'É' => 0x90, 'Í' => 0xD6, 'Ó' => 0xE0, 'Ú' => 0xE9,
+            'ñ' => 0xA4, 'Ñ' => 0xA5,
+            'ü' => 0x81, 'Ü' => 0x9A,
+            '¿' => 0xA8, '¡' => 0xAD,
+            _ if (character as u32) < 128 => character as u8,
+            'à' | 'â' | 'ä' => b'a',
+            'è' | 'ê' | 'ë' => b'e',
+            'ì' | 'î' | 'ï' => b'i',
+            'ò' | 'ô' | 'ö' => b'o',
+            'ù' | 'û' => b'u',
+            _ => b'?',
+        })
+        .collect()
+}
+
 fn escpos_ticket_bytes(text: &str, copies: i64) -> Vec<u8> {
     let mut bytes = Vec::new();
     for _ in 0..copies.max(1) {
         bytes.extend_from_slice(&[0x1B, 0x40]); // ESC @  -> reset printer
+        bytes.extend_from_slice(&[0x1B, 0x74, 0x02]); // ESC t 2 -> codepage CP850 (matches encode_cp850)
         bytes.extend_from_slice(&[0x1B, 0x45, 0x01]); // ESC E 1 -> emphasized (bold)
         bytes.extend_from_slice(&[0x1B, 0x47, 0x01]); // ESC G 1 -> double-strike (darker)
-        bytes.extend_from_slice(text.as_bytes());
+        bytes.extend_from_slice(&encode_cp850(text));
         bytes.extend_from_slice(b"\n\n\n"); // feed before cut
         bytes.extend_from_slice(&[0x1D, 0x56, 0x42, 0x00]); // GS V B 0 -> feed + partial cut
     }
@@ -530,10 +577,23 @@ fn print_ticket(state: State<'_, AppState>, sale_id: i64) -> CommandResult<Hardw
     let _ = fs::remove_file(&raw_file);
 
     // On Windows a driver-backed spooler queue rejects raw; fall back to the
-    // plain-text path (Out-Printer) so those setups keep working.
+    // plain-text path (Out-Printer) so those setups keep working. Surface the
+    // raw failure reason instead of silently swallowing it: without this a
+    // POS-58 that never actually gets a working raw print (bad printer name,
+    // policy blocking the helper script, printer offline) looks identical to
+    // a normal successful ticket, with no trail to diagnose why it's not
+    // cutting/using the 58mm width.
     #[cfg(windows)]
-    if raw_result.is_err() {
-        print_ticket_text(&printer, &text, copies)?;
+    {
+        if let Err(raw_error) = &raw_result {
+            print_ticket_text(&printer, &text, copies)?;
+            return Ok(HardwareResult {
+                ok: true,
+                message: format!(
+                    "Ticket enviado a {printer} en modo texto (fallo raw ESC/POS: {raw_error})"
+                ),
+            });
+        }
     }
     #[cfg(not(windows))]
     raw_result?;
@@ -1402,6 +1462,66 @@ mod tests {
     }
 
     #[test]
+    fn receipt_text_preserves_header_footer_indentation() {
+        let conn = flow_conn();
+        let now = now_iso();
+        for (key, value) in [
+            ("ticket_header", "   Centrado a mano"),
+            ("ticket_footer", "  Vuelve pronto  "),
+        ] {
+            conn.execute(
+                "INSERT INTO app_settings (key, value, updated_at) VALUES (?1, ?2, ?3)",
+                params![key, value, now],
+            )
+            .unwrap();
+        }
+        // sale_id <= 0 uses the same "Probar impresora" demo path the Settings
+        // screen's test-print button calls, so this exercises exactly what a
+        // real test print sends.
+        let text = receipt_text(&conn, 0).unwrap();
+        assert!(
+            text.contains("   Centrado a mano"),
+            "leading spaces the user typed in the header must survive to print: {text:?}"
+        );
+        assert!(
+            text.contains("  Vuelve pronto  "),
+            "leading/trailing spaces in the footer must survive to print: {text:?}"
+        );
+    }
+
+    #[test]
+    fn escpos_ticket_selects_cp850_codepage() {
+        let bytes = escpos_ticket_bytes("x", 1);
+        // ESC t 2 must appear right after the ESC @ reset, before any text.
+        assert_eq!(&bytes[2..5], &[0x1B, 0x74, 0x02]);
+    }
+
+    #[test]
+    fn encode_cp850_maps_common_spanish_accents() {
+        // Real strings this ticket generator actually sends: header/footer,
+        // "Codigo", product names. Wrong bytes here print as garbage symbols
+        // on real thermal hardware instead of the intended letter.
+        assert_eq!(encode_cp850("á"), vec![0xA0]);
+        assert_eq!(encode_cp850("é"), vec![0x82]);
+        assert_eq!(encode_cp850("í"), vec![0xA1]);
+        assert_eq!(encode_cp850("ó"), vec![0xA2]);
+        assert_eq!(encode_cp850("ú"), vec![0xA3]);
+        assert_eq!(encode_cp850("ñ"), vec![0xA4]);
+        assert_eq!(encode_cp850("Ñ"), vec![0xA5]);
+        assert_eq!(encode_cp850("¿Cómo estás?"), b"\xA8C\xA2mo est\xA0s?".to_vec());
+        assert_eq!(encode_cp850("Cajón"), b"Caj\xA2n".to_vec());
+        assert_eq!(encode_cp850("Gracias por su compra"), b"Gracias por su compra".to_vec());
+    }
+
+    #[test]
+    fn encode_cp850_falls_back_to_unaccented_letter_for_unmapped_chars() {
+        // Worst case must be "readable without the accent", never a wrong
+        // symbol (e.g. a box-drawing character or currency sign).
+        assert_eq!(encode_cp850("à"), vec![b'a']);
+        assert_eq!(encode_cp850("ê"), vec![b'e']);
+    }
+
+    #[test]
     fn cleanup_removes_only_old_unsold_hidden_products() {
         use crate::migrations::cleanup_orphan_quick_products;
         let mut conn = flow_conn();
@@ -1604,10 +1724,21 @@ mod tests {
         assert!(card_ticket.contains("VENTA A CREDITO"), "{card_ticket}");
         assert!(card_ticket.contains("FIRMA DEL CLIENTE"));
         assert!(card_ticket.contains("TERMINAL BANORTE-1"));
+        // Centered on the default 32-col width: (32-15)/2 = 8 leading spaces.
+        assert!(card_ticket.contains("        VENTA A CREDITO"), "{card_ticket}");
+        // Exactly one blank line separates it from what's above (products/totals).
+        assert!(card_ticket.contains("\n\n----"), "expected one blank line before the separator: {card_ticket}");
 
         // Cash sale must NOT get the credit voucher.
         let cash_ticket = receipt_text(&conn, cash.sale_id).unwrap();
         assert!(!cash_ticket.contains("VENTA A CREDITO"), "{cash_ticket}");
+    }
+
+    #[test]
+    fn center_line_pads_short_lines_and_leaves_wide_lines_alone() {
+        assert_eq!(center_line("VENTA A CREDITO", 32), format!("{}VENTA A CREDITO", " ".repeat(8)));
+        assert_eq!(center_line("this-line-is-already-32-chars!!", 32), "this-line-is-already-32-chars!!");
+        assert_eq!(center_line("this line is longer than the paper width", 32), "this line is longer than the paper width");
     }
 
     #[test]

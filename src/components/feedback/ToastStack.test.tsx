@@ -9,6 +9,10 @@ describe("ToastStack", () => {
     expect(getNotificationTone("Corte X listo")).toBe("success");
   });
 
+  it("treats the sale toast as success (it never includes hardware errors)", () => {
+    expect(getNotificationTone("Venta 24 realizada")).toBe("success");
+  });
+
   it("dismisses notification by id", () => {
     const onDismiss = vi.fn();
     render(
