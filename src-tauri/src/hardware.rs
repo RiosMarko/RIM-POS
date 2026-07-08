@@ -57,14 +57,37 @@ fn command_output(program: &str, args: &[&str], timeout_ms: u64) -> CommandResul
     let mut child = command
         .spawn()
         .map_err(|error| format!("No se pudo ejecutar {program}: {error}"))?;
+
+    // Drain stdout/stderr on background threads while we poll for exit.
+    // Without this, a child that writes more than the OS pipe buffer
+    // (~64KB on Windows) blocks on write() forever once the buffer fills,
+    // because nothing reads the pipe until the process exits -- and we only
+    // called wait_with_output() after exit. A PowerShell scan listing many
+    // printers (real + virtual, like "Fax"/"Microsoft Print to PDF") plus PnP
+    // devices easily exceeds that, so the process hung silently until our
+    // timeout killed it, yielding zero devices every time no matter how many
+    // were actually connected.
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let stdout_handle = thread::spawn(move || {
+        let mut buffer = Vec::new();
+        if let Some(pipe) = stdout_pipe.as_mut() {
+            let _ = pipe.read_to_end(&mut buffer);
+        }
+        buffer
+    });
+    let stderr_handle = thread::spawn(move || {
+        let mut buffer = Vec::new();
+        if let Some(pipe) = stderr_pipe.as_mut() {
+            let _ = pipe.read_to_end(&mut buffer);
+        }
+        buffer
+    });
+
     let started_at = Instant::now();
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => {
-                return child
-                    .wait_with_output()
-                    .map_err(|error| format!("{program} fallo al leer salida: {error}"));
-            }
+            Ok(Some(status)) => break status,
             Ok(None) => {
                 if started_at.elapsed() >= Duration::from_millis(timeout_ms) {
                     let _ = child.kill();
@@ -75,7 +98,10 @@ fn command_output(program: &str, args: &[&str], timeout_ms: u64) -> CommandResul
             }
             Err(error) => return Err(format!("{program} fallo: {error}")),
         }
-    }
+    };
+    let stdout = stdout_handle.join().unwrap_or_default();
+    let stderr = stderr_handle.join().unwrap_or_default();
+    Ok(Output { status, stdout, stderr })
 }
 
 #[cfg(windows)]
@@ -449,7 +475,7 @@ Get-PnpDevice -PresentOnly -Class Printer | ForEach-Object { "PRINTERPNP|$($_.Fr
     // so the broader Class-Printer PnP scan below doesn't add a duplicate row
     // for the same physical printer.
     let mut spooler_printer_names: HashSet<String> = HashSet::new();
-    for line in command_lines_timeout("powershell", &powershell_args(SCAN_SCRIPT), 6000) {
+    for line in command_lines_timeout("powershell", &powershell_args(SCAN_SCRIPT), 9000) {
         let parts: Vec<&str> = line.split('|').collect();
         let Some(tag) = parts.first().copied() else {
             continue;
@@ -964,8 +990,36 @@ pub fn read_serial_scale(
 
 #[cfg(test)]
 mod tests {
-    use super::{network_endpoint, parse_lpinfo_direct_line, parse_scale_weight};
+    use super::{command_lines, network_endpoint, parse_lpinfo_direct_line, parse_scale_weight};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    // Regression test for a real deadlock: a child process writing more than
+    // the OS pipe buffer (~64KB) used to hang forever because nothing drained
+    // stdout until the process exited, so it blocked on write() and our
+    // polling loop just timed out and killed it -- returning zero lines no
+    // matter how much real output there was. This is exactly what made
+    // Windows device detection return nothing (not even the always-present
+    // "Microsoft Print to PDF"/"Fax" virtual printers) once enough printers
+    // made the PowerShell scan's output big enough to fill the pipe.
+    #[cfg(not(windows))]
+    #[test]
+    fn command_output_does_not_deadlock_on_large_output() {
+        // `seq 1 20000` prints ~20000 lines, comfortably over 64KB, and exits
+        // quickly on its own -- unlike the old code, this must NOT time out.
+        let lines = command_lines("seq", &["1", "20000"]);
+        assert_eq!(lines.len(), 20000, "expected all lines, not a timeout-truncated empty result");
+        assert_eq!(lines.first().map(String::as_str), Some("1"));
+        assert_eq!(lines.last().map(String::as_str), Some("20000"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn command_output_does_not_deadlock_on_large_output() {
+        // Mirrors the real device-scan shape: a PowerShell pipeline producing
+        // enough lines to exceed the pipe buffer, must come back whole.
+        let lines = command_lines("powershell", &["-NoProfile", "-Command", "1..20000 | ForEach-Object { $_ }"]);
+        assert_eq!(lines.len(), 20000, "expected all lines, not a timeout-truncated empty result");
+    }
 
     #[test]
     fn parses_direct_usb_printer_line() {
