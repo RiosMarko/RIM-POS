@@ -13,11 +13,11 @@ export function SettingsView({
   showToast: (message: string) => void;
   onTaxModeChange: (mode: { enabled: boolean; pricesIncludeTax: boolean; roundTotalUp?: boolean }) => void;
 }) {
-  const [printer, setPrinter] = useState("mock-printer-80mm");
+  const [printer, setPrinter] = useState("");
   const [cutPrinter, setCutPrinter] = useState("");
-  const [scale, setScale] = useState("mock-scale-serial");
+  const [scale, setScale] = useState("");
   const [scaleBaudRate, setScaleBaudRate] = useState(9600);
-  const [drawer, setDrawer] = useState("mock-drawer-escpos");
+  const [drawer, setDrawer] = useState("");
   const [workstationId, setWorkstationId] = useState("CAJA-1");
   const [taxEnabled, setTaxEnabled] = useState(true);
   const [taxCountry, setTaxCountry] = useState("MX");
@@ -179,9 +179,9 @@ export function SettingsView({
         const nextTicketExtraLines = settings.ticket_extra_lines;
         const nextTicketCopies = settings.ticket_copies;
         const nextHardware = {
-          printer: nextPrinter || "mock-printer-80mm",
-          scale: nextScale || "mock-scale-serial",
-          drawer: nextDrawer || "mock-drawer-escpos",
+          printer: nextPrinter || "",
+          scale: nextScale || "",
+          drawer: nextDrawer || "",
         };
         setPrinter(nextHardware.printer);
         setCutPrinter(nextCutPrinter || "");
@@ -325,6 +325,7 @@ export function SettingsView({
       scale,
       scale_baud_rate: String(scaleBaudRate),
       drawer,
+      ticket_escpos: String(ticketEscpos),
     });
   };
 
@@ -615,7 +616,7 @@ export function SettingsView({
               <label>
                 Tipo de impresora ticket
                 <select value={ticketEscpos ? "escpos" : "normal"} onChange={(event) => setTicketEscpos(event.target.value === "escpos")}>
-                  <option value="escpos">Termica ESC/POS (58mm, corta papel)</option>
+                  <option value="escpos">Termica POS-58 / ESC/POS (58mm, corte)</option>
                   <option value="normal">Normal con driver (Brother, laser, tinta)</option>
                 </select>
               </label>
@@ -751,6 +752,7 @@ export function SettingsView({
           <div className="settings-list">
             <Setting icon={Archive} label="Caja/estacion" value={workstationId || "CAJA-1"} />
             <Setting icon={Printer} label="Impresora ticket" value={selectedDeviceName(printer)} />
+            <Setting icon={Printer} label="Modo ticket" value={ticketEscpos ? "Termica POS-58 / ESC/POS" : "Normal con driver"} />
             <Setting icon={Printer} label="Impresora corte" value={cutPrinter ? selectedDeviceName(cutPrinter) : "Misma que ticket"} />
             <Setting icon={Scale} label="Bascula" value={selectedDeviceName(scale)} />
             <Setting icon={Archive} label="Cajon" value={selectedDeviceName(drawer)} />

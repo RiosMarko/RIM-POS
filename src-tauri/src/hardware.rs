@@ -47,16 +47,71 @@ fn configure_command(command: &mut Command) {
     }
 }
 
+fn command_candidates(program: &str) -> Vec<String> {
+    let mut candidates = vec![program.to_string()];
+    #[cfg(not(windows))]
+    {
+        let system_path = match program {
+            "lp" | "lpstat" => Some(format!("/usr/bin/{program}")),
+            "lpinfo" | "cupsenable" | "cupsaccept" | "arp" => Some(format!("/usr/sbin/{program}")),
+            "ifconfig" => Some("/sbin/ifconfig".into()),
+            "hostname" => Some("/bin/hostname".into()),
+            "ippfind" => Some(format!("/usr/bin/{program}")),
+            _ => None,
+        };
+        if let Some(path) = system_path {
+            candidates.push(path);
+        }
+    }
+    #[cfg(windows)]
+    if program.eq_ignore_ascii_case("powershell") {
+        candidates.extend(["powershell.exe", "pwsh", "pwsh.exe"].into_iter().map(str::to_string));
+    }
+    candidates
+}
+
+fn command_path(program: &str) -> String {
+    command_candidates(program)
+        .into_iter()
+        .find(|candidate| std::path::Path::new(candidate).is_absolute() && std::path::Path::new(candidate).exists())
+        .unwrap_or_else(|| program.to_string())
+}
+
 fn command_output(program: &str, args: &[&str], timeout_ms: u64) -> CommandResult<Output> {
-    let mut command = Command::new(program);
-    command.args(args);
-    command.stdin(Stdio::null());
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
-    configure_command(&mut command);
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("No se pudo ejecutar {program}: {error}"))?;
+    let mut child = None;
+    let mut last_spawn_error = None;
+    for candidate in command_candidates(program) {
+        let mut command = Command::new(&candidate);
+        command.args(args);
+        command.stdin(Stdio::null());
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+        #[cfg(not(windows))]
+        {
+            // lpstat output is parsed below; avoid localized labels on macOS.
+            command.env("LC_ALL", "C");
+            command.env("LANG", "C");
+        }
+        configure_command(&mut command);
+        match command.spawn() {
+            Ok(process) => {
+                child = Some(process);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                last_spawn_error = Some(error);
+            }
+            Err(error) => return Err(format!("No se pudo ejecutar {program}: {error}")),
+        }
+    }
+    let mut child = child.ok_or_else(|| {
+        format!(
+            "No se pudo ejecutar {program}: {}",
+            last_spawn_error
+                .map(|error| error.to_string())
+                .unwrap_or_else(|| "comando no encontrado".into())
+        )
+    })?;
 
     // Drain stdout/stderr on background threads while we poll for exit.
     // Without this, a child that writes more than the OS pipe buffer
@@ -96,7 +151,11 @@ fn command_output(program: &str, args: &[&str], timeout_ms: u64) -> CommandResul
                 }
                 thread::sleep(Duration::from_millis(25));
             }
-            Err(error) => return Err(format!("{program} fallo: {error}")),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("{program} fallo: {error}"));
+            }
         }
     };
     let stdout = stdout_handle.join().unwrap_or_default();
@@ -779,7 +838,7 @@ public static class RimRawPrint {
       try {
         if(!StartPagePrinter(h)) throw new Exception("StartPagePrinter fallo: " + Marshal.GetLastWin32Error());
         int written;
-        if(!WritePrinter(h, bytes, bytes.Length, out written)) throw new Exception("WritePrinter fallo: " + Marshal.GetLastWin32Error());
+        if(!WritePrinter(h, bytes, bytes.Length, out written) || written != bytes.Length) throw new Exception("WritePrinter incompleto: " + written + "/" + bytes.Length + " bytes");
         EndPagePrinter(h);
       } finally { EndDocPrinter(h); }
     } finally { ClosePrinter(h); }
@@ -864,11 +923,11 @@ pub fn run_print_file(printer: &str, file: &PathBuf, raw: bool) -> CommandResult
         // CUPS stops a queue after a failed job (default error policy), which
         // silently holds every later job. Re-enable and un-pause the queue
         // before printing so a past jam doesn't keep new tickets stuck.
-        let _ = Command::new("cupsenable").arg(&printer).output();
-        let _ = Command::new("cupsaccept").arg(&printer).output();
+        let _ = Command::new(command_path("cupsenable")).arg(&printer).output();
+        let _ = Command::new(command_path("cupsaccept")).arg(&printer).output();
 
         let file_path = file.to_string_lossy().to_string();
-        let mut command = Command::new("lp");
+        let mut command = Command::new(command_path("lp"));
         if raw {
             command.args(["-o", "raw"]);
         }
@@ -1012,6 +1071,7 @@ mod tests {
         parse_lpinfo_direct_line, parse_scale_weight,
     };
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::time::Instant;
 
     // Regression test for a real deadlock: a child process writing more than
     // the OS pipe buffer (~64KB) used to hang forever because nothing drained
@@ -1057,6 +1117,35 @@ mod tests {
         assert!(strict.is_empty(), "strict variant should still discard on failure: {strict:?}");
         let lenient = command_lines_best_effort("sh", &["-c", script], 2000);
         assert_eq!(lenient, vec!["good_line".to_string()]);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn command_timeout_returns_without_waiting_for_child() {
+        let started_at = Instant::now();
+        let lines = command_lines_timeout("sh", &["-c", "sleep 2"], 100);
+        assert!(lines.is_empty());
+        assert!(started_at.elapsed().as_secs_f32() < 1.0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn command_timeout_returns_without_waiting_for_child() {
+        let started_at = Instant::now();
+        let lines = command_lines_timeout(
+            "powershell",
+            &[
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "Start-Sleep -Seconds 2",
+            ],
+            1000,
+        );
+        assert!(lines.is_empty());
+        assert!(started_at.elapsed().as_secs_f32() < 2.0);
     }
 
     #[cfg(windows)]

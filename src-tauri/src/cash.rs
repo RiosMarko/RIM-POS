@@ -1,7 +1,8 @@
 use crate::auth::{require_active_user, require_admin};
 use crate::backend::{
-    current_workstation_id, cut_printer_setting, has_permission, line_amounts, require_permission,
-    setting_bool, ticket_setting, ticket_separator, ticket_setting_i64, AppState, CommandResult,
+    current_workstation_id, cut_printer_setting, escpos_ticket_bytes, has_permission,
+    line_amounts, require_permission, setting_bool, ticket_setting, ticket_separator,
+    ticket_setting_i64, AppState, CommandResult,
 };
 use crate::backup::backup_create_with_conn;
 use crate::core::{average_ticket, now_iso, period_key, round_money};
@@ -13,6 +14,20 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::fs;
 use tauri::State;
+
+fn print_cut_report(printer: &str, text: &str, escpos: bool, prefix: &str) -> CommandResult<()> {
+    let extension = if escpos { "bin" } else { "txt" };
+    let contents = if escpos {
+        escpos_ticket_bytes(text, 1)
+    } else {
+        text.as_bytes().to_vec()
+    };
+    let file = temp_hardware_file(prefix, extension);
+    fs::write(&file, contents).map_err(|error| error.to_string())?;
+    let result = run_print_file(printer, &file, escpos);
+    let _ = fs::remove_file(file);
+    result
+}
 
 pub(crate) fn redact_shift_cut_profit(snapshot: &mut ShiftCutSnapshot) {
     snapshot.gross_profit = 0.0;
@@ -732,12 +747,10 @@ pub(crate) fn print_daily_cut(
     let conn = state.db.lock().map_err(|error| error.to_string())?;
     require_active_user(&conn, actor_id)?;
     let printer = cut_printer_setting(&conn)?;
+    let escpos = setting_bool(&conn, "ticket_escpos", true)?;
     let text = daily_cut_text(&conn, date, actor_id)?;
     drop(conn);
-    let file = temp_hardware_file("rim-pos-daily-cut", "txt");
-    fs::write(&file, text).map_err(|error| error.to_string())?;
-    run_print_file(&printer, &file, false)?;
-    let _ = fs::remove_file(file);
+    print_cut_report(&printer, &text, escpos, "rim-pos-daily-cut")?;
     Ok(HardwareResult {
         ok: true,
         message: "Corte general enviado a impresora".into(),
@@ -753,12 +766,10 @@ pub(crate) fn print_shift_cut(
     let conn = state.db.lock().map_err(|error| error.to_string())?;
     require_active_user(&conn, actor_id)?;
     let printer = cut_printer_setting(&conn)?;
+    let escpos = setting_bool(&conn, "ticket_escpos", true)?;
     let text = shift_cut_text(&conn, shift_id, actor_id)?;
     drop(conn);
-    let file = temp_hardware_file("rim-pos-cut", "txt");
-    fs::write(&file, text).map_err(|error| error.to_string())?;
-    run_print_file(&printer, &file, false)?;
-    let _ = fs::remove_file(file);
+    print_cut_report(&printer, &text, escpos, "rim-pos-cut")?;
     Ok(HardwareResult {
         ok: true,
         message: format!("Corte {shift_id} enviado a impresora"),
@@ -1521,4 +1532,3 @@ pub(crate) fn calculate_shift_cut(conn: &Connection, shift_id: i64) -> CommandRe
         top_customers_by_profit,
     })
 }
-
