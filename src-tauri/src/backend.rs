@@ -334,7 +334,7 @@ fn receipt_text(conn: &Connection, sale_id: i64) -> CommandResult<String> {
         demo.push_str(&"\n".repeat(extra_lines));
         return Ok(demo);
     }
-    let (folio, subtotal, tax, rounding, total, paid, change_due, created_at, cashier_name): (
+    let (folio, subtotal, tax, _rounding, total, paid, change_due, created_at, cashier_name): (
         String,
         f64,
         f64,
@@ -443,9 +443,6 @@ fn receipt_text(conn: &Connection, sale_id: i64) -> CommandResult<String> {
             "SUBTOTAL        ${subtotal:.2}\nIMPUESTOS       ${tax:.2}\n"
         ));
     }
-    if rounding.abs() >= 0.005 {
-        text.push_str(&format!("REDONDEO        ${rounding:.2}\n"));
-    }
     text.push_str(&format!("*** TOTAL       ${total:.2}\nPAGADO          ${paid:.2}\nCAMBIO          ${change_due:.2}\n"));
     if show_item_count {
         text.push_str(&format!("Articulos: {}\n", format_quantity(item_count)));
@@ -520,7 +517,7 @@ fn encode_cp850(text: &str) -> Vec<u8> {
         .collect()
 }
 
-pub(crate) fn escpos_ticket_bytes(text: &str, copies: i64) -> Vec<u8> {
+fn escpos_ticket_bytes(text: &str, copies: i64) -> Vec<u8> {
     let mut bytes = Vec::new();
     for _ in 0..copies.max(1) {
         bytes.extend_from_slice(&[0x1B, 0x40]); // ESC @  -> reset printer
@@ -559,7 +556,6 @@ fn print_ticket(state: State<'_, AppState>, sale_id: i64) -> CommandResult<Hardw
     // printer (Brother etc.) so its queue doesn't jam with raw bytes.
     let escpos = setting_bool(&conn, "ticket_escpos", true)?;
     let text = receipt_text(&conn, sale_id)?;
-    drop(conn);
 
     if !escpos {
         print_ticket_text(&printer, &text, copies)?;
@@ -577,8 +573,26 @@ fn print_ticket(state: State<'_, AppState>, sale_id: i64) -> CommandResult<Hardw
     let raw_result = run_print_file(&printer, &raw_file, true);
     let _ = fs::remove_file(&raw_file);
 
-    // POS-58 mode must fail loudly if RAW ESC/POS cannot reach queue. A text
-    // fallback reports success but skips thermal formatting and paper cut.
+    // On Windows a driver-backed spooler queue rejects raw; fall back to the
+    // plain-text path (Out-Printer) so those setups keep working. Surface the
+    // raw failure reason instead of silently swallowing it: without this a
+    // POS-58 that never actually gets a working raw print (bad printer name,
+    // policy blocking the helper script, printer offline) looks identical to
+    // a normal successful ticket, with no trail to diagnose why it's not
+    // cutting/using the 58mm width.
+    #[cfg(windows)]
+    {
+        if let Err(raw_error) = &raw_result {
+            print_ticket_text(&printer, &text, copies)?;
+            return Ok(HardwareResult {
+                ok: true,
+                message: format!(
+                    "Ticket enviado a {printer} en modo texto (fallo raw ESC/POS: {raw_error})"
+                ),
+            });
+        }
+    }
+    #[cfg(not(windows))]
     raw_result?;
 
     Ok(HardwareResult {
@@ -593,7 +607,6 @@ fn open_cash_drawer(state: State<'_, AppState>) -> CommandResult<HardwareResult>
     let drawer = setting_string(&conn, "drawer")?
         .or_else(|| setting_string(&conn, "printer").ok().flatten())
         .unwrap_or_default();
-    drop(conn);
     let pulse = [0x1B, 0x70, 0x00, 0x40, 0x50];
     if write_raw_device(&drawer, &pulse)? {
         return Ok(HardwareResult {
@@ -613,13 +626,9 @@ fn open_cash_drawer(state: State<'_, AppState>) -> CommandResult<HardwareResult>
 
 #[tauri::command]
 fn read_scale(state: State<'_, AppState>) -> CommandResult<ScaleReading> {
-    let (scale, baud_rate) = {
-        let conn = state.db.lock().map_err(|error| error.to_string())?;
-        (
-            setting_string(&conn, "scale")?.unwrap_or_default(),
-            ticket_setting_i64(&conn, "scale_baud_rate", 9600, 1200, 115200)? as u32,
-        )
-    };
+    let conn = state.db.lock().map_err(|error| error.to_string())?;
+    let scale = setting_string(&conn, "scale")?.unwrap_or_default();
+    let baud_rate = ticket_setting_i64(&conn, "scale_baud_rate", 9600, 1200, 115200)? as u32;
     let mut candidates = vec![baud_rate, 9600, 4800, 2400, 19200, 38400];
     candidates.dedup();
     let mut last_error = None;
@@ -636,7 +645,6 @@ fn read_scale(state: State<'_, AppState>) -> CommandResult<ScaleReading> {
     let (weight, raw, detected_baud_rate) =
         result.ok_or_else(|| last_error.unwrap_or_else(|| "No se pudo leer bascula".into()))?;
     if detected_baud_rate != baud_rate {
-        let conn = state.db.lock().map_err(|error| error.to_string())?;
         conn.execute(
             "INSERT INTO app_settings (key, value, updated_at)
              VALUES (?1, ?2, ?3)
@@ -1643,6 +1651,10 @@ mod tests {
         assert_eq!(total, 59.0);
         assert_eq!(rounding, 0.10);
         assert_eq!(change, 0.0);
+
+        let ticket = receipt_text(&conn, receipt.sale_id).unwrap();
+        assert!(ticket.contains("*** TOTAL       $59.00"), "{ticket}");
+        assert!(!ticket.contains("REDONDEO"), "{ticket}");
     }
 
     #[test]
